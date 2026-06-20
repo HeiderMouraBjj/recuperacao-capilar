@@ -4,8 +4,16 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <title>Minha Recuperação · Transplante Capilar</title>
-<meta name="theme-color" content="#1E2522" />
 <meta name="description" content="App de acompanhamento da recuperação pós transplante capilar — Instituto Milhomem." />
+
+<link rel="manifest" href="manifest.webmanifest" />
+<meta name="theme-color" content="#EFF1ED" />
+<link rel="icon" type="image/png" href="icon-192.png" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="Recuperação" />
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
@@ -51,9 +59,9 @@
   .fade-in { animation: fade .4s ease both; }
   @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
   @media (prefers-reduced-motion: reduce) { .fade-in { animation: none; } }
-  /* hairline scrollbar */
   ::-webkit-scrollbar { width: 10px; height: 10px; }
   ::-webkit-scrollbar-thumb { background: #DCDFD8; border-radius: 99px; border: 3px solid #EFF1ED; }
+  input[type="time"]::-webkit-calendar-picker-indicator { opacity: .4; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -63,18 +71,13 @@
 const { useState, useEffect, useMemo } = React;
 
 /* ----------------------------------------------------------------
-   Armazenamento — usa localStorage; cai para memória se indisponível
-   (assim funciona tanto no preview quanto aberto localmente / no Vercel)
+   Armazenamento (localStorage com fallback em memória)
 -----------------------------------------------------------------*/
 const STORE_KEY = 'recuperacao-capilar-v1';
 let memoryStore = null;
 function loadState() {
-  try {
-    const raw = window.localStorage.getItem(STORE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) {
-    return memoryStore;
-  }
+  try { const raw = window.localStorage.getItem(STORE_KEY); return raw ? JSON.parse(raw) : null; }
+  catch (e) { return memoryStore; }
 }
 function saveState(state) {
   memoryStore = state;
@@ -82,28 +85,35 @@ function saveState(state) {
 }
 
 /* ----------------------------------------------------------------
-   Datas
+   Datas / horários
 -----------------------------------------------------------------*/
 function midnight(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
 function daysSince(dateStr) {
   if (!dateStr) return 0;
   const s = new Date(dateStr + 'T00:00:00');
-  const diff = midnight(new Date()) - midnight(s);
-  return Math.floor(diff / 86400000);
+  return Math.floor((midnight(new Date()) - midnight(s)) / 86400000);
 }
 function addDays(dateStr, n) {
-  const s = new Date(dateStr + 'T00:00:00');
-  s.setDate(s.getDate() + n);
+  const s = new Date(dateStr + 'T00:00:00'); s.setDate(s.getDate() + n);
   return s.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
 }
-function fmtRange(start, end, surgeryDate) {
+function fmtRange(start, end) {
   if (end == null) return `a partir do dia ${start}`;
   if (start === end) return `dia ${start}`;
   return `dias ${start}–${end}`;
 }
+function nowHM() {
+  const d = new Date();
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+/* status helpers — valores do log podem ser: true (legado), 'done', 'skip' ou 'HH:MM' */
+const isDoneVal = v => !!v && v !== 'skip';
+const isSkipVal = v => v === 'skip';
+const isTimeVal = v => typeof v === 'string' && /^\d{1,2}:\d{2}$/.test(v);
 
 /* ----------------------------------------------------------------
-   Fases da recuperação
+   Fases
 -----------------------------------------------------------------*/
 const PHASES = [
   { id: 'imediato', label: 'Pós-operatório imediato', from: 0, to: 3 },
@@ -114,17 +124,15 @@ const PHASES = [
   { id: 'acompanhamento', label: 'Acompanhamento', from: 91, to: 365 },
   { id: 'manutencao', label: 'Manutenção', from: 366, to: 99999 },
 ];
-function phaseForDay(day) {
-  return PHASES.find(p => day >= p.from && day <= p.to) || PHASES[PHASES.length - 1];
-}
+const phaseForDay = day => PHASES.find(p => day >= p.from && day <= p.to) || PHASES[PHASES.length - 1];
 
 /* ----------------------------------------------------------------
-   Plano de cuidados — extraído da Orientação de Alta + Receita
-   kind: milestone | daily | med | advisory | continuous | asneeded | conditional | event
-   day 0 = dia da cirurgia
+   Plano de cuidados (Orientação de Alta + Receita) — dia 0 = cirurgia
+   mode: 'dose'  -> registra horário por repetição
+   mode: 'state' -> só "feito" / "não fiz"
 -----------------------------------------------------------------*/
 const CARE = [
-  // ---- Marcos (eventos únicos) ----
+  // Marcos
   { id: 'curativo', kind: 'milestone', start: 1, group: 'Cuidados', title: 'Retirar o curativo capacete',
     detail: 'A equipe retira o curativo no dia seguinte à cirurgia, conforme agendamento prévio.' },
   { id: 'hiperbarica1', kind: 'milestone', start: 1, group: 'Complementar', title: '1ª sessão de câmara hiperbárica',
@@ -140,43 +148,42 @@ const CARE = [
   { id: 'retorno-clinico', kind: 'milestone', start: 150, group: 'Acompanhamento', title: 'Primeiro retorno clínico',
     detail: 'Por volta de 5 meses após o transplante. Os próximos retornos dependem da sua evolução.' },
 
-  // ---- Tarefas diárias dentro de uma janela ----
-  { id: 'repouso', kind: 'daily', start: 0, end: 3, group: 'Cuidados', title: 'Repouso com a cabeça elevada',
+  // Diárias por estado (feito / não fiz)
+  { id: 'repouso', kind: 'daily', mode: 'state', start: 0, end: 3, group: 'Cuidados', title: 'Repouso com a cabeça elevada',
     detail: 'Nas primeiras 72h, descanse com a cabeça elevada a 30–45°.' },
-  { id: 'tape', kind: 'daily', start: 0, end: 5, group: 'Cuidados', title: 'Manter a Tape (fita)',
+  { id: 'tape', kind: 'daily', mode: 'state', start: 0, end: 5, group: 'Cuidados', title: 'Manter a Tape (fita)',
     detail: 'Manter a tape por 4 a 5 dias.' },
-  { id: 'camisa', kind: 'daily', start: 0, end: 10, group: 'Cuidados', title: 'Vestir camisa de botão',
+  { id: 'camisa', kind: 'daily', mode: 'state', start: 0, end: 10, group: 'Cuidados', title: 'Vestir camisa de botão',
     detail: 'Use camisas de botão por 10 dias para não passar roupa pela cabeça.' },
-  { id: 'lavagem-diaria', kind: 'daily', start: 1, end: 30, group: 'Higiene', title: 'Lavagem suave (Vichy Sensi-Scalp)',
+
+  // Diárias com horário (mode dose)
+  { id: 'lavagem-diaria', kind: 'daily', mode: 'dose', times: 1, start: 1, end: 30, group: 'Higiene', title: 'Lavagem suave (Vichy Sensi-Scalp)',
     detail: 'Água morna ou ambiente, nunca quente. Use um copo para enxaguar. Sem friccionar.' },
-  { id: 'oleo-johnson', kind: 'daily', start: 8, end: 10, group: 'Higiene', title: 'Óleo Johnson antes da lavagem',
+  { id: 'oleo-johnson', kind: 'daily', mode: 'dose', times: 1, start: 8, end: 10, group: 'Higiene', title: 'Óleo Johnson antes da lavagem',
     detail: 'Aplicar 30 min antes da lavagem, por 3 dias ou até as casquinhas caírem (sem friccionar).' },
 
-  // ---- Medicamentos com duração definida (receita + orientação) ----
-  { id: 'cefalexina', kind: 'med', start: 0, end: 6, group: 'Medicação', title: 'Cefalexina 500mg',
+  // Medicamentos com prazo (mode dose)
+  { id: 'cefalexina', kind: 'med', mode: 'dose', times: 2, start: 0, end: 6, group: 'Medicação', title: 'Cefalexina 500mg',
     detail: '1 comprimido por via oral, de 12 em 12 horas, durante 7 dias.', tag: '12/12h' },
-  { id: 'dexametasona', kind: 'med', start: 0, end: 3, group: 'Medicação', title: 'Dexametasona 4mg',
+  { id: 'dexametasona', kind: 'med', mode: 'dose', times: 1, start: 0, end: 3, group: 'Medicação', title: 'Dexametasona 4mg',
     detail: '1 comprimido por via oral, 1 vez ao dia, por 4 dias.', tag: '1x ao dia' },
-  { id: 'nebacetin', kind: 'med', start: 1, end: 7, group: 'Medicação', title: 'Nebacetin na área doadora',
+  { id: 'nebacetin', kind: 'med', mode: 'dose', times: 1, start: 1, end: 7, group: 'Medicação', title: 'Nebacetin na área doadora',
     detail: 'Aplicar na área doadora por 7 dias.', tag: 'tópico' },
-  { id: 'bepantol', kind: 'med', start: 1, end: 14, group: 'Medicação', title: 'Bepantol spray (área receptora)',
+  { id: 'bepantol', kind: 'med', mode: 'dose', times: 2, maxTimes: 4, start: 1, end: 14, group: 'Medicação', title: 'Bepantol spray (área receptora)',
     detail: '2 a 4x ao dia para hidratar a área receptora. Pode usar na doadora se coçar. Guarde na geladeira para aliviar a coceira.', tag: '2–4x ao dia' },
 
-  // ---- Se necessário ----
+  // Se necessário
   { id: 'dipirona', kind: 'asneeded', start: 0, end: null, group: 'Medicação', title: 'Dipirona 500mg',
     detail: '1 comprimido por via oral, até de 6 em 6 horas, se necessário, em caso de dor.', tag: 'se dor' },
   { id: 'cetoconazol', kind: 'conditional', start: 1, end: null, group: 'Higiene', title: 'Shampoo de cetoconazol 2%',
     detail: 'Usar 1 a 2x por semana, caso haja foliculite.', tag: 'se foliculite' },
 
-  // ---- Uso contínuo (manter) ----
-  { id: 'dutasterida', kind: 'continuous', group: 'Medicação', title: 'Dutasterida (Avodart)',
-    detail: 'Manter o uso normalmente, conforme prescrição.' },
-  { id: 'pillfood', kind: 'continuous', group: 'Medicação', title: 'PILL FOOD',
-    detail: 'Manter o uso normalmente.' },
-  { id: 'keranat', kind: 'continuous', group: 'Medicação', title: 'Keranat',
-    detail: 'Manter o uso normalmente.' },
+  // Uso contínuo
+  { id: 'dutasterida', kind: 'continuous', group: 'Medicação', title: 'Dutasterida (Avodart)', detail: 'Manter o uso normalmente, conforme prescrição.' },
+  { id: 'pillfood', kind: 'continuous', group: 'Medicação', title: 'PILL FOOD', detail: 'Manter o uso normalmente.' },
+  { id: 'keranat', kind: 'continuous', group: 'Medicação', title: 'Keranat', detail: 'Manter o uso normalmente.' },
 
-  // ---- Avisos / atenção (não são checklist) ----
+  // Avisos
   { id: 'inchaco', kind: 'advisory', start: 2, end: 7, group: 'Sintomas', title: 'Inchaço na testa e pálpebras',
     detail: 'É comum entre o 2º e o 3º dia e costuma passar até o 7º dia.' },
   { id: 'nao-cocar', kind: 'advisory', start: 0, end: 45, group: 'Sintomas', title: 'Não coçar a área',
@@ -190,6 +197,11 @@ const CARE = [
 ];
 
 const CHECKABLE = ['daily', 'med'];
+const reqDoses = t => t.times || 1;
+const maxDoses = t => t.maxTimes || reqDoses(t);
+const isDose = t => t.mode === 'dose';
+const isState = t => t.mode === 'state';
+
 function isActiveOn(t, day) {
   if (t.kind === 'milestone') return t.start === day;
   if (CHECKABLE.includes(t.kind) || t.kind === 'advisory') {
@@ -198,36 +210,51 @@ function isActiveOn(t, day) {
   }
   return false;
 }
-function keyFor(t, day) {
-  return t.kind === 'milestone' ? t.id : `${t.id}#${day}`;
+const topKey = (t, day) => t.kind === 'milestone' ? t.id : `${t.id}#${day}`;
+const doseKey = (t, day, i) => `${t.id}#${day}#${i}`;
+
+/* status de um item no dia: { state, done, total } */
+function statusFor(t, day, log) {
+  const top = log[topKey(t, day)];
+  if (isSkipVal(top)) return { state: 'skip', done: 0, total: t.kind === 'milestone' ? 1 : reqDoses(t) };
+  if (t.kind === 'milestone') return { state: isDoneVal(top) ? 'done' : 'pending', done: isDoneVal(top) ? 1 : 0, total: 1 };
+  if (isState(t)) return { state: isDoneVal(top) ? 'done' : 'pending', done: isDoneVal(top) ? 1 : 0, total: 1 };
+  // dose
+  const total = reqDoses(t);
+  if (isDoneVal(top)) return { state: 'done', done: total, total };
+  const max = maxDoses(t);
+  let cnt = 0;
+  for (let i = 0; i < max; i++) if (isDoneVal(log[doseKey(t, day, i)])) cnt++;
+  const state = cnt === 0 ? 'pending' : (cnt >= total ? 'done' : 'partial');
+  return { state, done: cnt, total };
 }
 
 /* ----------------------------------------------------------------
-   Ícones (SVG inline, minimalistas)
+   Ícones
 -----------------------------------------------------------------*/
 const Icon = ({ d, size = 20, stroke = 1.6, fill = 'none', className = '' }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke="currentColor"
-    strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" className={className}>
-    {d}
-  </svg>
+    strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" className={className}>{d}</svg>
 );
 const icons = {
   today: <><circle cx="12" cy="12" r="4" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2" /></>,
-  journey: <><circle cx="6" cy="6" r="2.2" /><circle cx="6" cy="18" r="2.2" /><circle cx="18" cy="12" r="2.2" /><path d="M6 8.2v7.6M8.2 6h5.4a3 3 0 0 1 3 3v0M8.2 18h5.4a3 3 0 0 0 3-3v0" /></>,
+  journey: <><circle cx="6" cy="6" r="2.2" /><circle cx="6" cy="18" r="2.2" /><circle cx="18" cy="12" r="2.2" /><path d="M6 8.2v7.6M8.2 6h5.4a3 3 0 0 1 3 3M8.2 18h5.4a3 3 0 0 0 3-3" /></>,
   pill: <><path d="M10.5 3.5 3.5 10.5a4.95 4.95 0 0 0 7 7l7-7a4.95 4.95 0 0 0-7-7Z" /><path d="m7 7 7 7" /></>,
   phone: <path d="M5 4h3l2 5-2.5 1.5a11 11 0 0 0 5 5L16 18l5 2v3a2 2 0 0 1-2 2A17 17 0 0 1 3 6a2 2 0 0 1 2-2Z" />,
   check: <path d="M20 6 9 17l-5-5" />,
+  x: <path d="M18 6 6 18M6 6l12 12" />,
   chevron: <path d="m9 18 6-6-6-6" />,
   gear: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 6.3 19l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H2a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 6.3l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 11 3.2V3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 18 5l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0 1.2 2.9H21a2 2 0 1 1 0 4Z" /></>,
   drop: <path d="M12 3s6 6 6 10a6 6 0 0 1-12 0c0-4 6-10 6-10Z" />,
-  calendar: <><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M3 9h18M8 3v4M16 3v4" /></>,
   alert: <><path d="M12 9v4M12 17h.01" /><path d="M10.3 3.9 2 19a2 2 0 0 0 1.7 3h16.6A2 2 0 0 0 22 19L13.7 3.9a2 2 0 0 0-3.4 0Z" /></>,
   repeat: <><path d="m17 2 4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14M7 22l-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" /></>,
-  scissors: <><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12" /></>,
+  clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
+  plus: <path d="M12 5v14M5 12h14" />,
+  history: <><path d="M3 3v5h5" /><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8" /><path d="M12 7v5l3.5 2" /></>,
 };
 
 /* ----------------------------------------------------------------
-   Componentes auxiliares
+   UI compartilhada
 -----------------------------------------------------------------*/
 function ProgressRing({ value = 0, size = 56 }) {
   const r = (size - 8) / 2, c = 2 * Math.PI * r;
@@ -241,35 +268,125 @@ function ProgressRing({ value = 0, size = 56 }) {
   );
 }
 
-function TaskRow({ task, day, done, onToggle }) {
-  const checkable = CHECKABLE.includes(task.kind);
+function SkipToggle({ skipped, onToggle }) {
   return (
-    <div className={`flex items-start gap-3 px-4 py-3.5 rounded-xl border transition
-      ${done ? 'bg-sageSoft/60 border-sage/30' : 'bg-mist border-line hover:border-bronze/40'}`}>
-      {checkable ? (
-        <button onClick={() => onToggle(keyFor(task, day))} aria-pressed={done}
-          aria-label={done ? `Desmarcar ${task.title}` : `Marcar ${task.title} como feito`}
-          className={`mt-0.5 shrink-0 w-6 h-6 rounded-md grid place-items-center border transition
-            ${done ? 'bg-sage border-sage text-white' : 'bg-mist border-line text-transparent hover:border-bronze'}`}>
-          <Icon d={icons.check} size={15} stroke={2.4} />
-        </button>
-      ) : (
-        <span className="mt-0.5 shrink-0 w-6 h-6 rounded-md grid place-items-center bg-bronzeSoft text-bronzeDeep">
-          <Icon d={icons.alert} size={14} stroke={2} />
-        </span>
-      )}
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className={`text-[15px] font-medium leading-tight ${done ? 'text-sage line-through decoration-sage/40' : 'text-ink'}`}>
-            {task.title}
-          </span>
-          {task.tag && (
-            <span className="text-[11px] font-semibold uppercase tracking-wide text-bronzeDeep bg-bronzeSoft px-1.5 py-0.5 rounded">
-              {task.tag}
+    <button onClick={onToggle} aria-pressed={skipped}
+      className={`shrink-0 text-[12px] font-semibold px-2.5 py-1 rounded-lg border transition inline-flex items-center gap-1
+        ${skipped ? 'border-inkSoft/50 text-ink bg-porcelain' : 'border-line text-inkSoft hover:border-inkSoft/60'}`}>
+      {skipped && <Icon d={icons.check} size={12} stroke={2.6} />}
+      Não fiz
+    </button>
+  );
+}
+
+/* Doses com horário: cada repetição vira um chip (marca a hora atual; editável) */
+function DoseControls({ t, day, log, setLog }) {
+  const required = reqDoses(t);
+  const max = maxDoses(t);
+  let highest = required - 1;
+  for (let i = 0; i < max; i++) if (log[doseKey(t, day, i)] != null) highest = Math.max(highest, i);
+  const slotsCount = Math.max(required, highest + 1);
+  const slots = Array.from({ length: slotsCount }, (_, i) => i);
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      {slots.map(i => {
+        const v = log[doseKey(t, day, i)];
+        const done = isDoneVal(v);
+        const time = isTimeVal(v) ? v : '';
+        if (done) {
+          return (
+            <span key={i} className="inline-flex items-center gap-1 rounded-lg bg-sageSoft border border-sage/40 pl-2 pr-1 py-1">
+              <Icon d={icons.check} size={13} stroke={2.6} className="text-sage" />
+              <input type="time" value={time}
+                onChange={e => setLog(doseKey(t, day, i), e.target.value || 'done')}
+                aria-label={`Horário da ${required > 1 ? `${i+1}ª ` : ''}aplicação`}
+                className="bg-transparent text-sage text-[13px] font-semibold w-[62px] focus:outline-none" />
+              <button onClick={() => setLog(doseKey(t, day, i), null)} aria-label="Desmarcar esta dose"
+                className="w-5 h-5 grid place-items-center text-sage/70 hover:text-sage rounded">
+                <Icon d={icons.x} size={13} stroke={2.2} />
+              </button>
             </span>
-          )}
+          );
+        }
+        return (
+          <button key={i} onClick={() => setLog(doseKey(t, day, i), nowHM())}
+            title="Marcar com a hora atual"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[13px] font-medium text-inkSoft hover:border-bronze hover:text-bronzeDeep transition">
+            <Icon d={icons.clock} size={14} />
+            {required > 1 ? `${i + 1}ª dose` : 'Marcar'}
+          </button>
+        );
+      })}
+      {slotsCount < max && (
+        <button onClick={() => setLog(doseKey(t, day, slotsCount), nowHM())}
+          title="Registrar uma aplicação a mais"
+          className="inline-flex items-center gap-1 rounded-lg border border-dashed border-bronze/50 px-2.5 py-1.5 text-[13px] font-medium text-bronzeDeep hover:bg-bronzeSoft transition">
+          <Icon d={icons.plus} size={14} /> dose
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* Cartão de tarefa (Hoje + Medicamentos) */
+function CareCard({ t, day, log, setLog, setTop, skipTask }) {
+  const status = statusFor(t, day, log);
+  const skipped = status.state === 'skip';
+  const done = status.state === 'done';
+  const partial = status.state === 'partial';
+
+  const bg = skipped ? 'bg-porcelain border-line opacity-80'
+    : done ? 'bg-sageSoft/60 border-sage/30'
+    : partial ? 'bg-mist border-bronze/40'
+    : 'bg-mist border-line';
+
+  return (
+    <div className={`rounded-xl border px-4 py-3.5 transition ${bg}`}>
+      <div className="flex items-start gap-3">
+        <span className={`mt-0.5 shrink-0 w-6 h-6 rounded-md grid place-items-center
+          ${done ? 'bg-sage text-white' : skipped ? 'bg-inkSoft/15 text-inkSoft' : 'bg-bronzeSoft text-bronzeDeep'}`}>
+          <Icon d={done ? icons.check : skipped ? icons.x : (isDose(t) ? icons.clock : icons.check)} size={14} stroke={2.2} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`text-[15px] font-medium leading-tight ${done ? 'text-sage' : skipped ? 'text-inkSoft line-through' : 'text-ink'}`}>{t.title}</span>
+            {t.tag && <span className="text-[11px] font-semibold uppercase tracking-wide text-bronzeDeep bg-bronzeSoft px-1.5 py-0.5 rounded">{t.tag}</span>}
+            {isDose(t) && status.total > 1 && !skipped && (
+              <span className="text-[11px] font-semibold text-inkSoft">{status.done}/{status.total}</span>
+            )}
+          </div>
+          <p className="text-[13px] text-inkSoft mt-1 leading-snug">{t.detail}</p>
         </div>
-        <p className="text-[13px] text-inkSoft mt-1 leading-snug">{task.detail}</p>
+        <SkipToggle skipped={skipped} onToggle={() => skipTask(t, day)} />
+      </div>
+
+      {!skipped && (
+        <div className="mt-3 pl-9">
+          {isDose(t)
+            ? <DoseControls t={t} day={day} log={log} setLog={setLog} />
+            : (
+              <button onClick={() => setTop(t, day, done ? null : 'done')}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-semibold border transition
+                  ${done ? 'bg-sage border-sage text-white' : 'border-line text-ink hover:border-bronze hover:text-bronzeDeep'}`}>
+                <Icon d={icons.check} size={14} stroke={2.4} /> {done ? 'Feito' : 'Marcar como feito'}
+              </button>
+            )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdvisoryRow({ t }) {
+  return (
+    <div className="flex items-start gap-3 px-4 py-3.5 rounded-xl bg-bronzeSoft/30 border border-bronze/20">
+      <span className="mt-0.5 shrink-0 w-6 h-6 rounded-md grid place-items-center bg-bronzeSoft text-bronzeDeep">
+        <Icon d={icons.alert} size={14} stroke={2} />
+      </span>
+      <div className="min-w-0">
+        <span className="text-[15px] font-medium text-ink leading-tight">{t.title}</span>
+        <p className="text-[13px] text-inkSoft mt-1 leading-snug">{t.detail}</p>
       </div>
     </div>
   );
@@ -278,55 +395,47 @@ function TaskRow({ task, day, done, onToggle }) {
 /* ----------------------------------------------------------------
    TELA · HOJE
 -----------------------------------------------------------------*/
-function HojeView({ day, surgeryDate, done, toggle }) {
+function HojeView({ day, surgeryDate, log, setLog, setTop, skipTask }) {
   const phase = phaseForDay(day);
+  const todayTasks = useMemo(() => CARE.filter(t => CHECKABLE.includes(t.kind) && isActiveOn(t, day)), [day]);
+  const todayMilestones = useMemo(() => CARE.filter(t => t.kind === 'milestone' && t.start === day), [day]);
+  const advisories = useMemo(() => CARE.filter(t => t.kind === 'advisory' && isActiveOn(t, day)), [day]);
 
-  const todayTasks = useMemo(() =>
-    CARE.filter(t => CHECKABLE.includes(t.kind) && isActiveOn(t, day)), [day]);
-  const todayMilestones = useMemo(() =>
-    CARE.filter(t => t.kind === 'milestone' && t.start === day), [day]);
-  const advisories = useMemo(() =>
-    CARE.filter(t => t.kind === 'advisory' && isActiveOn(t, day)), [day]);
+  const required = [...todayMilestones, ...todayTasks];
+  const statuses = required.map(t => statusFor(t, day, log));
+  const doneN = statuses.filter(s => s.state === 'done').length;
+  const skipN = statuses.filter(s => s.state === 'skip').length;
+  const pct = required.length ? doneN / required.length : 0;
 
-  const required = [...todayTasks, ...todayMilestones];
-  const doneCount = required.filter(t => done[keyFor(t, day)]).length;
-  const pct = required.length ? doneCount / required.length : 0;
-
-  const nextMilestone = useMemo(() => {
-    return CARE.filter(t => t.kind === 'milestone' && t.start > day)
-      .sort((a, b) => a.start - b.start)[0];
-  }, [day]);
+  const nextMilestone = useMemo(() =>
+    CARE.filter(t => t.kind === 'milestone' && t.start > day).sort((a, b) => a.start - b.start)[0], [day]);
 
   if (day < 0) {
     return (
       <div className="fade-in max-w-2xl">
         <p className="text-[13px] font-semibold uppercase tracking-[0.18em] text-bronze">Contagem</p>
-        <h1 className="font-serif text-4xl text-ink mt-2">Faltam {Math.abs(day)} dia{Math.abs(day)>1?'s':''}</h1>
-        <p className="text-inkSoft mt-2">para a sua cirurgia, marcada para {addDays(surgeryDate, 0)}. Quando o dia chegar, o app começa a contar a recuperação.</p>
+        <h1 className="font-serif text-4xl text-ink mt-2">Faltam {Math.abs(day)} dia{Math.abs(day) > 1 ? 's' : ''}</h1>
+        <p className="text-inkSoft mt-2">para a sua cirurgia, marcada para {addDays(surgeryDate, 0)}.</p>
       </div>
     );
   }
 
   return (
     <div className="fade-in space-y-7 max-w-2xl">
-      {/* Hero */}
       <header>
         <p className="text-[13px] font-semibold uppercase tracking-[0.18em] text-bronze">Seu dia</p>
-        <div className="mt-2 flex items-end gap-4 flex-wrap">
-          <h1 className="font-serif text-[3.4rem] leading-none text-ink">
-            {day === 0 ? 'Dia da cirurgia' : <>Dia <span className="text-bronze">{day}</span></>}
-          </h1>
-        </div>
+        <h1 className="font-serif text-[3.4rem] leading-none text-ink mt-2">
+          {day === 0 ? 'Dia da cirurgia' : <>Dia <span className="text-bronze">{day}</span></>}
+        </h1>
         <p className="text-inkSoft mt-3">
           Fase: <span className="text-ink font-medium">{phase.label}</span>
           <span className="mx-2 text-line">·</span>
           {required.length > 0
-            ? <>{doneCount} de {required.length} concluído{required.length>1?'s':''} hoje</>
+            ? <>{doneN} de {required.length} feito{required.length > 1 ? 's' : ''}{skipN > 0 ? ` · ${skipN} não fiz` : ''}</>
             : <>nada obrigatório hoje — siga os cuidados contínuos</>}
         </p>
       </header>
 
-      {/* Próximo passo */}
       {(todayMilestones.length > 0 || nextMilestone) && (
         <section className="rounded-2xl bg-ink text-porcelain p-5 shadow-card">
           {todayMilestones.length > 0 ? (
@@ -346,41 +455,34 @@ function HojeView({ day, surgeryDate, done, toggle }) {
               <p className="text-porcelain/70 text-[14px] mt-1.5 leading-snug">{nextMilestone.detail}</p>
               <p className="text-bronzeSoft text-[13px] mt-3 font-medium">
                 Dia {nextMilestone.start} · {addDays(surgeryDate, nextMilestone.start)}
-                <span className="text-porcelain/50"> · faltam {nextMilestone.start - day} dia{nextMilestone.start - day>1?'s':''}</span>
+                <span className="text-porcelain/50"> · faltam {nextMilestone.start - day} dia{nextMilestone.start - day > 1 ? 's' : ''}</span>
               </p>
             </>
           )}
         </section>
       )}
 
-      {/* Para fazer hoje */}
       {required.length > 0 && (
         <section>
           <div className="flex items-center justify-between mb-3">
             <h3 className="font-serif text-xl text-ink">Para fazer hoje</h3>
             <div className="flex items-center gap-2.5">
               <ProgressRing value={pct} size={42} />
-              <span className="text-[13px] text-inkSoft font-medium">{Math.round(pct*100)}%</span>
+              <span className="text-[13px] text-inkSoft font-medium">{Math.round(pct * 100)}%</span>
             </div>
           </div>
           <div className="space-y-2.5">
-            {todayMilestones.map(t => (
-              <TaskRow key={t.id} task={{...t, kind:'daily'}} day={day} done={!!done[keyFor(t, day)]} onToggle={toggle} />
-            ))}
-            {todayTasks.map(t => (
-              <TaskRow key={t.id} task={t} day={day} done={!!done[keyFor(t, day)]} onToggle={toggle} />
+            {required.map(t => (
+              <CareCard key={t.id} t={t} day={day} log={log} setLog={setLog} setTop={setTop} skipTask={skipTask} />
             ))}
           </div>
         </section>
       )}
 
-      {/* Atenção */}
       {advisories.length > 0 && (
         <section>
           <h3 className="font-serif text-xl text-ink mb-3">Fique atento</h3>
-          <div className="space-y-2.5">
-            {advisories.map(t => <TaskRow key={t.id} task={t} day={day} done={false} onToggle={()=>{}} />)}
-          </div>
+          <div className="space-y-2.5">{advisories.map(t => <AdvisoryRow key={t.id} t={t} />)}</div>
         </section>
       )}
     </div>
@@ -388,23 +490,23 @@ function HojeView({ day, surgeryDate, done, toggle }) {
 }
 
 /* ----------------------------------------------------------------
-   TELA · JORNADA (linha do tempo)
+   TELA · JORNADA
 -----------------------------------------------------------------*/
-function JornadaView({ day, surgeryDate, done, toggle }) {
-  // entradas ordenadas: marcos + janelas (representadas pelo início)
+function JornadaView({ day, surgeryDate, log, setTop }) {
   const entries = useMemo(() => {
     const list = [];
     CARE.forEach(t => {
       if (t.kind === 'milestone') list.push({ ...t, at: t.start, range: null });
       else if (CHECKABLE.includes(t.kind)) list.push({ ...t, at: t.start, range: fmtRange(t.start, t.end) });
-      else if (t.kind === 'advisory') list.push({ ...t, at: t.start, range: fmtRange(t.start, t.end), soft: true });
+      else if (t.kind === 'advisory') list.push({ ...t, at: t.start, range: fmtRange(t.start, t.end) });
     });
     return list.sort((a, b) => a.at - b.at || (a.kind === 'milestone' ? -1 : 1));
   }, []);
 
   function statusOf(e) {
     if (e.kind === 'milestone') {
-      if (done[e.id]) return 'feito';
+      if (isSkipVal(log[e.id])) return 'naofiz';
+      if (isDoneVal(log[e.id])) return 'feito';
       if (e.at === day) return 'hoje';
       if (e.at < day) return 'passou';
       return 'futuro';
@@ -416,26 +518,23 @@ function JornadaView({ day, surgeryDate, done, toggle }) {
   }
 
   const palette = {
-    feito:      { node: 'bg-sage border-sage', text: 'text-sage', label: 'Concluído' },
-    concluido:  { node: 'bg-sage border-sage', text: 'text-sage', label: 'Concluído' },
-    hoje:       { node: 'bg-bronze border-bronze ring-4 ring-bronzeSoft', text: 'text-bronzeDeep', label: 'Hoje' },
-    ativo:      { node: 'bg-bronze border-bronze ring-4 ring-bronzeSoft', text: 'text-bronzeDeep', label: 'Em andamento' },
-    passou:     { node: 'bg-mist border-line', text: 'text-inkSoft', label: 'Passou' },
-    futuro:     { node: 'bg-mist border-line', text: 'text-inkSoft/60', label: 'A seguir' },
+    feito: { node: 'bg-sage border-sage', text: 'text-sage', label: 'Concluído' },
+    concluido: { node: 'bg-sage border-sage', text: 'text-sage', label: 'Concluído' },
+    hoje: { node: 'bg-bronze border-bronze ring-4 ring-bronzeSoft', text: 'text-bronzeDeep', label: 'Hoje' },
+    ativo: { node: 'bg-bronze border-bronze ring-4 ring-bronzeSoft', text: 'text-bronzeDeep', label: 'Em andamento' },
+    naofiz: { node: 'bg-porcelain border-inkSoft/50', text: 'text-inkSoft', label: 'Não fiz' },
+    passou: { node: 'bg-mist border-line', text: 'text-inkSoft', label: 'Passou' },
+    futuro: { node: 'bg-mist border-line', text: 'text-inkSoft/60', label: 'A seguir' },
   };
 
-  // agrupar por fase
-  const byPhase = PHASES.map(p => ({
-    phase: p,
-    items: entries.filter(e => e.at >= p.from && e.at <= p.to),
-  })).filter(g => g.items.length);
+  const byPhase = PHASES.map(p => ({ phase: p, items: entries.filter(e => e.at >= p.from && e.at <= p.to) })).filter(g => g.items.length);
 
   return (
     <div className="fade-in max-w-2xl">
       <header className="mb-7">
         <p className="text-[13px] font-semibold uppercase tracking-[0.18em] text-bronze">Sua jornada</p>
         <h1 className="font-serif text-4xl text-ink mt-2">Linha do tempo</h1>
-        <p className="text-inkSoft mt-2">Toda a recuperação, do dia da cirurgia ao acompanhamento. O ponto destacado é onde você está hoje.</p>
+        <p className="text-inkSoft mt-2">Da cirurgia ao acompanhamento. O ponto destacado é onde você está hoje.</p>
       </header>
 
       {byPhase.map(({ phase, items }) => (
@@ -446,36 +545,36 @@ function JornadaView({ day, surgeryDate, done, toggle }) {
               {phase.to >= 9999 ? 'a partir de 1 ano' : phase.from === phase.to ? `dia ${phase.from}` : `dias ${phase.from}–${phase.to}`}
             </span>
           </div>
-
           <div className="relative pl-1">
             <div className="absolute left-[12px] top-2 bottom-2 w-px bg-line" />
             <div className="space-y-1">
               {items.map((e, i) => {
                 const st = statusOf(e);
                 const c = palette[st];
-                const isMilestone = e.kind === 'milestone';
+                const isMs = e.kind === 'milestone';
+                const isDoneMs = isDoneVal(log[e.id]);
+                const showBtn = isMs && ['hoje', 'passou', 'feito', 'naofiz'].includes(st);
                 return (
                   <div key={e.id + i} className="relative flex gap-4 py-2.5">
                     <div className="relative z-10 shrink-0">
                       <span className={`block w-[18px] h-[18px] rounded-full border-2 ${c.node} grid place-items-center text-white`}>
                         {(st === 'feito' || st === 'concluido') && <Icon d={icons.check} size={11} stroke={3} />}
+                        {st === 'naofiz' && <Icon d={icons.x} size={10} stroke={2.6} className="text-inkSoft" />}
                       </span>
                     </div>
                     <div className="flex-1 -mt-0.5">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className={`text-[11px] font-semibold uppercase tracking-wide ${c.text}`}>{c.label}</span>
-                        <span className="text-[11px] text-inkSoft/70">
-                          {isMilestone ? `dia ${e.at} · ${addDays(surgeryDate, e.at)}` : e.range}
-                        </span>
+                        <span className="text-[11px] text-inkSoft/70">{isMs ? `dia ${e.at} · ${addDays(surgeryDate, e.at)}` : e.range}</span>
                       </div>
                       <h3 className={`text-[15px] font-medium mt-0.5 ${st === 'futuro' ? 'text-inkSoft' : 'text-ink'}`}>{e.title}</h3>
                       <p className="text-[13px] text-inkSoft leading-snug mt-0.5">{e.detail}</p>
-                      {isMilestone && (st === 'hoje' || st === 'passou') && (
-                        <button onClick={() => toggle(e.id)}
+                      {showBtn && (
+                        <button onClick={() => setTop(e, day, isDoneMs ? null : 'done')}
                           className={`mt-2 text-[13px] font-semibold inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition
-                            ${done[e.id] ? 'border-sage text-sage bg-sageSoft' : 'border-bronze text-bronzeDeep hover:bg-bronzeSoft'}`}>
+                            ${isDoneMs ? 'border-sage text-sage bg-sageSoft' : 'border-bronze text-bronzeDeep hover:bg-bronzeSoft'}`}>
                           <Icon d={icons.check} size={13} stroke={2.4} />
-                          {done[e.id] ? 'Concluído' : 'Marcar como concluído'}
+                          {isDoneMs ? 'Concluído' : 'Marcar como concluído'}
                         </button>
                       )}
                     </div>
@@ -493,7 +592,7 @@ function JornadaView({ day, surgeryDate, done, toggle }) {
 /* ----------------------------------------------------------------
    TELA · MEDICAMENTOS
 -----------------------------------------------------------------*/
-function MedsView({ day, surgeryDate, done, toggle }) {
+function MedsView({ day, surgeryDate, log, setLog, setTop, skipTask }) {
   const meds = CARE.filter(t => t.kind === 'med');
   const asNeeded = CARE.filter(t => t.kind === 'asneeded' || t.kind === 'conditional');
   const continuous = CARE.filter(t => t.kind === 'continuous');
@@ -513,36 +612,31 @@ function MedsView({ day, surgeryDate, done, toggle }) {
           const elapsed = Math.min(Math.max(day - m.start + 1, 0), total);
           const active = isActiveOn(m, day);
           const finished = day > m.end;
-          const isDone = !!done[keyFor(m, day)];
+          const status = statusFor(m, day, log);
+          const skipped = status.state === 'skip';
           return (
             <div key={m.id} className="rounded-2xl bg-mist border border-line p-4 shadow-card">
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex items-start gap-3 min-w-0">
-                  <span className="shrink-0 w-9 h-9 rounded-xl bg-bronzeSoft text-bronzeDeep grid place-items-center">
-                    <Icon d={m.id === 'nebacetin' || m.id === 'bepantol' ? icons.drop : icons.pill} size={18} />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="text-[15px] font-semibold text-ink">{m.title}</h3>
-                      <span className="text-[11px] font-semibold uppercase tracking-wide text-bronzeDeep bg-bronzeSoft px-1.5 py-0.5 rounded">{m.tag}</span>
-                    </div>
-                    <p className="text-[13px] text-inkSoft mt-1 leading-snug">{m.detail}</p>
+              <div className="flex items-start gap-3">
+                <span className="shrink-0 w-9 h-9 rounded-xl bg-bronzeSoft text-bronzeDeep grid place-items-center">
+                  <Icon d={m.id === 'nebacetin' || m.id === 'bepantol' ? icons.drop : icons.pill} size={18} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-[15px] font-semibold text-ink">{m.title}</h3>
+                    <span className="text-[11px] font-semibold uppercase tracking-wide text-bronzeDeep bg-bronzeSoft px-1.5 py-0.5 rounded">{m.tag}</span>
                   </div>
+                  <p className="text-[13px] text-inkSoft mt-1 leading-snug">{m.detail}</p>
                 </div>
-                {active && (
-                  <button onClick={() => toggle(keyFor(m, day))} aria-pressed={isDone}
-                    aria-label={isDone ? 'Desmarcar dose de hoje' : 'Marcar dose de hoje'}
-                    className={`shrink-0 w-7 h-7 rounded-md grid place-items-center border transition
-                      ${isDone ? 'bg-sage border-sage text-white' : 'bg-mist border-line text-transparent hover:border-bronze'}`}>
-                    <Icon d={icons.check} size={16} stroke={2.4} />
-                  </button>
-                )}
+                {active && <SkipToggle skipped={skipped} onToggle={() => skipTask(m, day)} />}
               </div>
 
-              {/* barra de duração */}
+              {active && !skipped && (
+                <div className="mt-3 pl-12"><DoseControls t={m} day={day} log={log} setLog={setLog} /></div>
+              )}
+
               <div className="mt-3 flex items-center gap-3">
                 <div className="flex-1 h-1.5 rounded-full bg-line overflow-hidden">
-                  <div className="h-full rounded-full bg-sage" style={{ width: `${(elapsed/total)*100}%` }} />
+                  <div className="h-full rounded-full bg-sage" style={{ width: `${(elapsed / total) * 100}%` }} />
                 </div>
                 <span className={`text-[12px] font-medium ${finished ? 'text-sage' : active ? 'text-bronzeDeep' : 'text-inkSoft'}`}>
                   {finished ? 'Tratamento concluído' : active ? `Dia ${elapsed} de ${total}` : `Começa no dia ${m.start}`}
@@ -557,9 +651,7 @@ function MedsView({ day, surgeryDate, done, toggle }) {
       <div className="space-y-3 mb-8">
         {asNeeded.map(m => (
           <div key={m.id} className="rounded-2xl bg-mist border border-line p-4 flex items-start gap-3">
-            <span className="shrink-0 w-9 h-9 rounded-xl bg-porcelain text-inkSoft grid place-items-center">
-              <Icon d={icons.pill} size={18} />
-            </span>
+            <span className="shrink-0 w-9 h-9 rounded-xl bg-porcelain text-inkSoft grid place-items-center"><Icon d={icons.pill} size={18} /></span>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="text-[15px] font-semibold text-ink">{m.title}</h3>
@@ -623,9 +715,7 @@ function ContatoView() {
                 <Icon d={icons.phone} size={18} />
               </a>
               <a href={`https://wa.me/${c.wa}`} target="_blank" rel="noopener noreferrer"
-                className="px-4 h-10 rounded-xl bg-sage text-white grid place-items-center text-[14px] font-semibold hover:bg-sage/90 transition">
-                WhatsApp
-              </a>
+                className="px-4 h-10 rounded-xl bg-sage text-white grid place-items-center text-[14px] font-semibold hover:bg-sage/90 transition">WhatsApp</a>
             </div>
           </div>
         ))}
@@ -641,7 +731,90 @@ function ContatoView() {
 }
 
 /* ----------------------------------------------------------------
-   Modal de configuração (data da cirurgia)
+   TELA · HISTÓRICO
+-----------------------------------------------------------------*/
+function HistoryView({ day, surgeryDate, log }) {
+  const history = useMemo(() => {
+    const out = [];
+    for (let d = day; d >= 0; d--) {
+      const items = [];
+      CARE.forEach(t => {
+        if (CHECKABLE.includes(t.kind) && isActiveOn(t, d)) {
+          const top = log[topKey(t, d)];
+          if (isSkipVal(top)) { items.push({ id: t.id, title: t.title, status: 'skip' }); return; }
+          if (isDose(t)) {
+            if (isDoneVal(top)) { items.push({ id: t.id, title: t.title, status: 'done', times: [] }); return; }
+            const max = maxDoses(t); const times = [];
+            for (let i = 0; i < max; i++) { const v = log[doseKey(t, d, i)]; if (isDoneVal(v)) times.push(isTimeVal(v) ? v : null); }
+            if (times.length) items.push({ id: t.id, title: t.title, total: reqDoses(t),
+              status: times.filter(Boolean).length >= reqDoses(t) || times.length >= reqDoses(t) ? 'done' : 'partial',
+              times: times.filter(Boolean).sort() });
+          } else if (isDoneVal(top)) {
+            items.push({ id: t.id, title: t.title, status: 'done' });
+          }
+        }
+        if (t.kind === 'milestone' && t.start === d) {
+          const v = log[t.id];
+          if (isSkipVal(v)) items.push({ id: t.id, title: t.title, status: 'skip', milestone: true });
+          else if (isDoneVal(v)) items.push({ id: t.id, title: t.title, status: 'done', milestone: true });
+        }
+      });
+      if (items.length) out.push({ d, items });
+    }
+    return out;
+  }, [day, log]);
+
+  return (
+    <div className="fade-in max-w-2xl">
+      <header className="mb-7">
+        <p className="text-[13px] font-semibold uppercase tracking-[0.18em] text-bronze">Registro</p>
+        <h1 className="font-serif text-4xl text-ink mt-2">Histórico</h1>
+        <p className="text-inkSoft mt-2">O que você marcou em cada dia, com os horários das doses.</p>
+      </header>
+
+      {history.length === 0 ? (
+        <div className="rounded-2xl border border-line bg-mist p-6 text-center">
+          <p className="text-inkSoft text-[14px]">Ainda não há registros. O que você marcar na aba <span className="text-ink font-medium">Hoje</span> aparece aqui, dia a dia.</p>
+        </div>
+      ) : history.map(({ d, items }) => (
+        <section key={d} className="mb-6">
+          <div className="flex items-baseline gap-3 mb-2.5">
+            <h2 className="font-serif text-lg text-ink">{d === 0 ? 'Dia da cirurgia' : `Dia ${d}`}</h2>
+            <span className="text-[12px] text-inkSoft">{addDays(surgeryDate, d)}{d === day ? ' · hoje' : ''}</span>
+          </div>
+          <div className="rounded-2xl bg-mist border border-line divide-y divide-line overflow-hidden">
+            {items.map(it => {
+              const hasTimes = it.times && it.times.length > 0;
+              return (
+                <div key={it.id} className="px-4 py-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <span className={`w-5 h-5 rounded-md grid place-items-center shrink-0
+                      ${it.status === 'skip' ? 'bg-inkSoft/15 text-inkSoft' : it.status === 'partial' ? 'bg-bronzeSoft text-bronzeDeep' : 'bg-sage text-white'}`}>
+                      <Icon d={it.status === 'skip' ? icons.x : icons.check} size={12} stroke={2.6} />
+                    </span>
+                    <span className={`text-[14px] truncate ${it.status === 'skip' ? 'text-inkSoft line-through' : 'text-ink'}`}>{it.title}</span>
+                  </div>
+                  <span className="text-[13px] font-medium shrink-0 text-right">
+                    {it.status === 'skip'
+                      ? <span className="text-inkSoft">não fiz</span>
+                      : hasTimes
+                        ? <><span className="text-bronzeDeep">{it.times.join(' · ')}</span>{it.total > 1 && <span className="text-inkSoft"> ({it.times.length}/{it.total})</span>}</>
+                        : it.milestone
+                          ? <span className="text-sage">concluído</span>
+                          : <span className="text-sage">feito</span>}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------
+   Modal · data da cirurgia
 -----------------------------------------------------------------*/
 function SettingsModal({ surgeryDate, onSave, onClose }) {
   const [date, setDate] = useState(surgeryDate);
@@ -665,38 +838,53 @@ function SettingsModal({ surgeryDate, onSave, onClose }) {
    APP
 -----------------------------------------------------------------*/
 const NAV = [
-  { id: 'hoje', label: 'Hoje', icon: icons.today },
-  { id: 'jornada', label: 'Jornada', icon: icons.journey },
-  { id: 'medicamentos', label: 'Medicamentos', icon: icons.pill },
-  { id: 'contato', label: 'Contato', icon: icons.phone },
+  { id: 'hoje', label: 'Hoje', short: 'Hoje', icon: icons.today },
+  { id: 'jornada', label: 'Jornada', short: 'Jornada', icon: icons.journey },
+  { id: 'medicamentos', label: 'Medicamentos', short: 'Remédios', icon: icons.pill },
+  { id: 'historico', label: 'Histórico', short: 'Histórico', icon: icons.history },
+  { id: 'contato', label: 'Contato', short: 'Contato', icon: icons.phone },
 ];
 
 function App() {
   const initial = loadState() || { done: {}, surgeryDate: '2026-06-19' };
-  const [done, setDone] = useState(initial.done || {});
+  const [log, setLogState] = useState(initial.done || {});
   const [surgeryDate, setSurgeryDate] = useState(initial.surgeryDate || '2026-06-19');
   const [view, setView] = useState('hoje');
   const [showSettings, setShowSettings] = useState(false);
 
-  useEffect(() => { saveState({ done, surgeryDate }); }, [done, surgeryDate]);
+  useEffect(() => { saveState({ done: log, surgeryDate }); }, [log, surgeryDate]);
 
   const day = daysSince(surgeryDate);
-  const toggle = (key) => setDone(prev => {
+
+  const setLog = (key, value) => setLogState(prev => {
     const next = { ...prev };
-    if (next[key]) delete next[key]; else next[key] = true;
+    if (value === null || value === undefined) delete next[key]; else next[key] = value;
+    return next;
+  });
+  const setTop = (t, day, value) => setLog(topKey(t, day), value);
+  const skipTask = (t, day) => setLogState(prev => {
+    const next = { ...prev };
+    const tk = topKey(t, day);
+    if (isSkipVal(next[tk])) { delete next[tk]; }
+    else {
+      next[tk] = 'skip';
+      const max = maxDoses(t);
+      for (let i = 0; i < max; i++) delete next[doseKey(t, day, i)];
+    }
     return next;
   });
 
+  const shared = { day, surgeryDate, log, setLog, setTop, skipTask };
   const views = {
-    hoje: <HojeView day={day} surgeryDate={surgeryDate} done={done} toggle={toggle} />,
-    jornada: <JornadaView day={day} surgeryDate={surgeryDate} done={done} toggle={toggle} />,
-    medicamentos: <MedsView day={day} surgeryDate={surgeryDate} done={done} toggle={toggle} />,
+    hoje: <HojeView {...shared} />,
+    jornada: <JornadaView {...shared} />,
+    medicamentos: <MedsView {...shared} />,
+    historico: <HistoryView {...shared} />,
     contato: <ContatoView />,
   };
 
   return (
     <div className="min-h-screen md:flex">
-      {/* Sidebar (desktop) */}
       <aside className="hidden md:flex md:flex-col w-64 shrink-0 border-r border-line bg-porcelain/60 sticky top-0 h-screen p-6">
         <div className="flex items-center gap-2.5 mb-9">
           <span className="w-9 h-9 rounded-full border-2 border-bronze grid place-items-center font-serif text-bronze text-lg">M</span>
@@ -710,54 +898,41 @@ function App() {
             <button key={n.id} onClick={() => setView(n.id)}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[14.5px] font-medium transition
                 ${view === n.id ? 'bg-ink text-porcelain' : 'text-inkSoft hover:bg-porcelain hover:text-ink'}`}>
-              <Icon d={n.icon} size={19} stroke={view === n.id ? 1.8 : 1.6} />
-              {n.label}
+              <Icon d={n.icon} size={19} stroke={view === n.id ? 1.8 : 1.6} />{n.label}
             </button>
           ))}
         </nav>
         <div className="mt-auto pt-6 border-t border-line">
-          <button onClick={() => setShowSettings(true)}
-            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] text-inkSoft hover:text-ink transition">
-            <Icon d={icons.gear} size={16} />
-            Cirurgia: {addDays(surgeryDate, 0)}
+          <button onClick={() => setShowSettings(true)} className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] text-inkSoft hover:text-ink transition">
+            <Icon d={icons.gear} size={16} /> Cirurgia: {addDays(surgeryDate, 0)}
           </button>
           <p className="text-[11px] text-inkSoft/70 mt-3 px-3 leading-snug">Instituto Milhomem · Dr. Pablo Milhomem</p>
         </div>
       </aside>
 
-      {/* Conteúdo */}
       <main className="flex-1 min-w-0">
-        {/* topo mobile */}
         <div className="md:hidden sticky top-0 z-30 bg-porcelain/90 backdrop-blur border-b border-line px-5 py-3.5 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="w-7 h-7 rounded-full border-2 border-bronze grid place-items-center font-serif text-bronze text-sm">M</span>
             <span className="font-serif text-[16px] text-ink">Recuperação</span>
           </div>
-          <button onClick={() => setShowSettings(true)} className="text-inkSoft p-1" aria-label="Configurar data da cirurgia">
-            <Icon d={icons.gear} size={20} />
-          </button>
+          <button onClick={() => setShowSettings(true)} className="text-inkSoft p-1" aria-label="Configurar data da cirurgia"><Icon d={icons.gear} size={20} /></button>
         </div>
-
-        <div className="px-5 md:px-12 py-7 md:py-12 pb-28 md:pb-12">
-          {views[view]}
-        </div>
+        <div className="px-5 md:px-12 py-7 md:py-12 pb-28 md:pb-12">{views[view]}</div>
       </main>
 
-      {/* Tab bar (mobile) */}
-      <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-mist border-t border-line grid grid-cols-4 px-2 pt-1.5 pb-[calc(0.4rem+env(safe-area-inset-bottom))]">
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-mist border-t border-line grid grid-cols-5 px-1 pt-1.5 pb-[calc(0.4rem+env(safe-area-inset-bottom))]">
         {NAV.map(n => (
           <button key={n.id} onClick={() => setView(n.id)}
-            className={`flex flex-col items-center gap-1 py-1.5 rounded-lg text-[11px] font-medium transition
-              ${view === n.id ? 'text-bronzeDeep' : 'text-inkSoft'}`}>
-            <Icon d={n.icon} size={21} stroke={view === n.id ? 2 : 1.6} />
-            {n.label}
+            className={`flex flex-col items-center gap-1 py-1.5 rounded-lg text-[10px] font-medium transition ${view === n.id ? 'text-bronzeDeep' : 'text-inkSoft'}`}>
+            <Icon d={n.icon} size={20} stroke={view === n.id ? 2 : 1.6} /><span className="truncate max-w-full leading-none">{n.short}</span>
           </button>
         ))}
       </nav>
 
       {showSettings && (
         <SettingsModal surgeryDate={surgeryDate}
-          onSave={(d) => { setSurgeryDate(d); setShowSettings(false); }}
+          onSave={d => { setSurgeryDate(d); setShowSettings(false); }}
           onClose={() => setShowSettings(false)} />
       )}
     </div>
@@ -765,6 +940,13 @@ function App() {
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function () {});
+    });
+  }
 </script>
 </body>
 </html>
