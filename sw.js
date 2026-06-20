@@ -1,6 +1,6 @@
 /* Service worker — deixa o app instalável e funcionando offline.
    Estratégia: cache-first com atualização em segundo plano (stale-while-revalidate). */
-const CACHE = 'recup-capilar-v2';
+const CACHE = 'recup-capilar-v3';
 const CORE = [
   './',
   './index.html',
@@ -42,4 +42,8 @@ self.addEventListener('fetch', (e) => {
       return cached || network;
     })
   );
+});
+
+self.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
 });
