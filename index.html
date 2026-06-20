@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Minha Recuperação · Transplante Capilar</title>
+<meta name="theme-color" content="#1E2522" />
+<meta name="description" content="App de acompanhamento da recuperação pós transplante capilar — Instituto Milhomem." />
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          porcelain: '#EFF1ED',
+          ink: '#1E2522',
+          inkSoft: '#59635D',
+          bronze: '#A9743A',
+          bronzeDeep: '#875A2A',
+          bronzeSoft: '#F2E7D7',
+          sage: '#5E7A66',
+          sageSoft: '#E4ECE4',
+          mist: '#FFFFFF',
+          line: '#DCDFD8',
+        },
+        fontFamily: {
+          serif: ['Fraunces', 'ui-serif', 'Georgia', 'serif'],
+          sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        },
+        boxShadow: {
+          card: '0 1px 2px rgba(30,37,34,0.04), 0 8px 24px -16px rgba(30,37,34,0.18)',
+        }
+      }
+    }
+  }
+</script>
+<style>
+  html, body { background: #EFF1ED; }
+  * { -webkit-tap-highlight-color: transparent; }
+  body { font-family: 'Inter', sans-serif; }
+  ::selection { background: #F2E7D7; color: #875A2A; }
+  .fade-in { animation: fade .4s ease both; }
+  @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .fade-in { animation: none; } }
+  /* hairline scrollbar */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #DCDFD8; border-radius: 99px; border: 3px solid #EFF1ED; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+
+/* ----------------------------------------------------------------
+   Armazenamento — usa localStorage; cai para memória se indisponível
+   (assim funciona tanto no preview quanto aberto localmente / no Vercel)
+-----------------------------------------------------------------*/
+const STORE_KEY = 'recuperacao-capilar-v1';
+let memoryStore = null;
+function loadState() {
+  try {
+    const raw = window.localStorage.getItem(STORE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return memoryStore;
+  }
+}
+function saveState(state) {
+  memoryStore = state;
+  try { window.localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) {}
+}
+
+/* ----------------------------------------------------------------
+   Datas
+-----------------------------------------------------------------*/
+function midnight(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+function daysSince(dateStr) {
+  if (!dateStr) return 0;
+  const s = new Date(dateStr + 'T00:00:00');
+  const diff = midnight(new Date()) - midnight(s);
+  return Math.floor(diff / 86400000);
+}
+function addDays(dateStr, n) {
+  const s = new Date(dateStr + 'T00:00:00');
+  s.setDate(s.getDate() + n);
+  return s.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' });
+}
+function fmtRange(start, end, surgeryDate) {
+  if (end == null) return `a partir do dia ${start}`;
+  if (start === end) return `dia ${start}`;
+  return `dias ${start}–${end}`;
+}
+
+/* ----------------------------------------------------------------
+   Fases da recuperação
+-----------------------------------------------------------------*/
+const PHASES = [
+  { id: 'imediato', label: 'Pós-operatório imediato', from: 0, to: 3 },
+  { id: 'semana1', label: 'Primeira semana', from: 4, to: 7 },
+  { id: 'casquinhas', label: 'Casquinhas e desmame', from: 8, to: 10 },
+  { id: 'mes1', label: 'Primeiro mês', from: 11, to: 30 },
+  { id: 'consolidacao', label: 'Consolidação', from: 31, to: 90 },
+  { id: 'acompanhamento', label: 'Acompanhamento', from: 91, to: 365 },
+  { id: 'manutencao', label: 'Manutenção', from: 366, to: 99999 },
+];
+function phaseForDay(day) {
+  return PHASES.find(p => day >= p.from && day <= p.to) || PHASES[PHASES.length - 1];
+}
+
+/* ----------------------------------------------------------------
+   Plano de cuidados — extraído da Orientação de Alta + Receita
+   kind: milestone | daily | med | advisory | continuous | asneeded | conditional | event
+   day 0 = dia da cirurgia
+-----------------------------------------------------------------*/
+const CARE = [
+  // ---- Marcos (eventos únicos) ----
+  { id: 'curativo', kind: 'milestone', start: 1, group: 'Cuidados', title: 'Retirar o curativo capacete',
+    detail: 'A equipe retira o curativo no dia seguinte à cirurgia, conforme agendamento prévio.' },
+  { id: 'hiperbarica1', kind: 'milestone', start: 1, group: 'Complementar', title: '1ª sessão de câmara hiperbárica',
+    detail: 'A primeira sessão é no dia seguinte ao transplante; as demais são sequenciais (1 a 4 no total).' },
+  { id: 'iniciar-lavagem', kind: 'milestone', start: 1, group: 'Higiene', title: 'Começar as lavagens diárias',
+    detail: 'Depois de retirar o curativo, inicie as lavagens suaves diárias com o Vichy Sensi-Scalp.' },
+  { id: 'lavagem8', kind: 'milestone', start: 8, group: 'Acompanhamento', title: 'Lavagem do 8º dia',
+    detail: 'Agende pelo WhatsApp com antecedência. Aqui começa o desmame das casquinhas.' },
+  { id: 'minoxidil-retomar', kind: 'milestone', start: 10, group: 'Medicação', title: 'Retomar o Minoxidil (oral e tópico)',
+    detail: 'Pode voltar a usar o minoxidil oral e tópico após 10 dias do procedimento.' },
+  { id: 'mesoterapia', kind: 'milestone', start: 30, group: 'Complementar', title: 'Iniciar a mesoterapia',
+    detail: 'Aplicações intradérmicas a partir de 30 dias. Pelo menos 4 sessões, 1x ao mês. Agende com a equipe.' },
+  { id: 'retorno-clinico', kind: 'milestone', start: 150, group: 'Acompanhamento', title: 'Primeiro retorno clínico',
+    detail: 'Por volta de 5 meses após o transplante. Os próximos retornos dependem da sua evolução.' },
+
+  // ---- Tarefas diárias dentro de uma janela ----
+  { id: 'repouso', kind: 'daily', start: 0, end: 3, group: 'Cuidados', title: 'Repouso com a cabeça elevada',
+    detail: 'Nas primeiras 72h, descanse com a cabeça elevada a 30–45°.' },
+  { id: 'tape', kind: 'daily', start: 0, end: 5, group: 'Cuidados', title: 'Manter a Tape (fita)',
+    detail: 'Manter a tape por 4 a 5 dias.' },
+  { id: 'camisa', kind: 'daily', start: 0, end: 10, group: 'Cuidados', title: 'Vestir camisa de botão',
+    detail: 'Use camisas de botão por 10 dias para não passar roupa pela cabeça.' },
+  { id: 'lavagem-diaria', kind: 'daily', start: 1, end: 30, group: 'Higiene', title: 'Lavagem suave (Vichy Sensi-Scalp)',
+    detail: 'Água morna ou ambiente, nunca quente. Use um copo para enxaguar. Sem friccionar.' },
+  { id: 'oleo-johnson', kind: 'daily', start: 8, end: 10, group: 'Higiene', title: 'Óleo Johnson antes da lavagem',
+    detail: 'Aplicar 30 min antes da lavagem, por 3 dias ou até as casquinhas caírem (sem friccionar).' },
+
+  // ---- Medicamentos com duração definida (receita + orientação) ----
+  { id: 'cefalexina', kind: 'med', start: 0, end: 6, group: 'Medicação', title: 'Cefalexina 500mg',
+    detail: '1 comprimido por via oral, de 12 em 12 horas, durante 7 dias.', tag: '12/12h' },
+  { id: 'dexametasona', kind: 'med', start: 0, end: 3, group: 'Medicação', title: 'Dexametasona 4mg',
+    detail: '1 comprimido por via oral, 1 vez ao dia, por 4 dias.', tag: '1x ao dia' },
+  { id: 'nebacetin', kind: 'med', start: 1, end: 7, group: 'Medicação', title: 'Nebacetin na área doadora',
+    detail: 'Aplicar na área doadora por 7 dias.', tag: 'tópico' },
+  { id: 'bepantol', kind: 'med', start: 1, end: 14, group: 'Medicação', title: 'Bepantol spray (área receptora)',
+    detail: '2 a 4x ao dia para hidratar a área receptora. Pode usar na doadora se coçar. Guarde na geladeira para aliviar a coceira.', tag: '2–4x ao dia' },
+
+  // ---- Se necessário ----
+  { id: 'dipirona', kind: 'asneeded', start: 0, end: null, group: 'Medicação', title: 'Dipirona 500mg',
+    detail: '1 comprimido por via oral, até de 6 em 6 horas, se necessário, em caso de dor.', tag: 'se dor' },
+  { id: 'cetoconazol', kind: 'conditional', start: 1, end: null, group: 'Higiene', title: 'Shampoo de cetoconazol 2%',
+    detail: 'Usar 1 a 2x por semana, caso haja foliculite.', tag: 'se foliculite' },
+
+  // ---- Uso contínuo (manter) ----
+  { id: 'dutasterida', kind: 'continuous', group: 'Medicação', title: 'Dutasterida (Avodart)',
+    detail: 'Manter o uso normalmente, conforme prescrição.' },
+  { id: 'pillfood', kind: 'continuous', group: 'Medicação', title: 'PILL FOOD',
+    detail: 'Manter o uso normalmente.' },
+  { id: 'keranat', kind: 'continuous', group: 'Medicação', title: 'Keranat',
+    detail: 'Manter o uso normalmente.' },
+
+  // ---- Avisos / atenção (não são checklist) ----
+  { id: 'inchaco', kind: 'advisory', start: 2, end: 7, group: 'Sintomas', title: 'Inchaço na testa e pálpebras',
+    detail: 'É comum entre o 2º e o 3º dia e costuma passar até o 7º dia.' },
+  { id: 'nao-cocar', kind: 'advisory', start: 0, end: 45, group: 'Sintomas', title: 'Não coçar a área',
+    detail: 'Coceiras são esperadas — não coce. Use o Bepantol spray indicado.' },
+  { id: 'sol', kind: 'advisory', start: 0, end: 60, group: 'Proteção', title: 'Evitar exposição ao sol',
+    detail: 'Evite sol por pelo menos 2 meses. Depois da queda total das casquinhas, pode usar boné ou chapéu largo/frouxo.' },
+  { id: 'foliculite', kind: 'advisory', start: 30, end: 365, group: 'Sintomas', title: 'Atenção à foliculite',
+    detail: 'Pode surgir a partir do 1º mês. Até 10 espinhas é normal — acima disso, contate a equipe.' },
+  { id: 'troca-shampoo', kind: 'event', group: 'Higiene', title: 'Trocar para Vichy Energizante Antiqueda',
+    detail: 'Quando o frasco do Sensi-Scalp acabar, inicie o Energizante Antiqueda.' },
+];
+
+const CHECKABLE = ['daily', 'med'];
+function isActiveOn(t, day) {
+  if (t.kind === 'milestone') return t.start === day;
+  if (CHECKABLE.includes(t.kind) || t.kind === 'advisory') {
+    const end = t.end == null ? Infinity : t.end;
+    return day >= t.start && day <= end;
+  }
+  return false;
+}
+function keyFor(t, day) {
+  return t.kind === 'milestone' ? t.id : `${t.id}#${day}`;
+}
+
+/* ----------------------------------------------------------------
+   Ícones (SVG inline, minimalistas)
+-----------------------------------------------------------------*/
+const Icon = ({ d, size = 20, stroke = 1.6, fill = 'none', className = '' }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke="currentColor"
+    strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round" className={className}>
+    {d}
+  </svg>
+);
+const icons = {
+  today: <><circle cx="12" cy="12" r="4" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2" /></>,
+  journey: <><circle cx="6" cy="6" r="2.2" /><circle cx="6" cy="18" r="2.2" /><circle cx="18" cy="12" r="2.2" /><path d="M6 8.2v7.6M8.2 6h5.4a3 3 0 0 1 3 3v0M8.2 18h5.4a3 3 0 0 0 3-3v0" /></>,
+  pill: <><path d="M10.5 3.5 3.5 10.5a4.95 4.95 0 0 0 7 7l7-7a4.95 4.95 0 0 0-7-7Z" /><path d="m7 7 7 7" /></>,
+  phone: <path d="M5 4h3l2 5-2.5 1.5a11 11 0 0 0 5 5L16 18l5 2v3a2 2 0 0 1-2 2A17 17 0 0 1 3 6a2 2 0 0 1 2-2Z" />,
+  check: <path d="M20 6 9 17l-5-5" />,
+  chevron: <path d="m9 18 6-6-6-6" />,
+  gear: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 6.3 19l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0-1.2-2.9H2a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 5 6.3l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 11 3.2V3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 18 5l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0 1.2 2.9H21a2 2 0 1 1 0 4Z" /></>,
+  drop: <path d="M12 3s6 6 6 10a6 6 0 0 1-12 0c0-4 6-10 6-10Z" />,
+  calendar: <><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M3 9h18M8 3v4M16 3v4" /></>,
+  alert: <><path d="M12 9v4M12 17h.01" /><path d="M10.3 3.9 2 19a2 2 0 0 0 1.7 3h16.6A2 2 0 0 0 22 19L13.7 3.9a2 2 0 0 0-3.4 0Z" /></>,
+  repeat: <><path d="m17 2 4 4-4 4" /><path d="M3 11v-1a4 4 0 0 1 4-4h14M7 22l-4-4 4-4" /><path d="M21 13v1a4 4 0 0 1-4 4H3" /></>,
+  scissors: <><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M20 4 8.12 15.88M14.47 14.48 20 20M8.12 8.12 12 12" /></>,
+};
+
+/* ----------------------------------------------------------------
+   Componentes auxiliares
+-----------------------------------------------------------------*/
+function ProgressRing({ value = 0, size = 56 }) {
+  const r = (size - 8) / 2, c = 2 * Math.PI * r;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="-rotate-90">
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#DCDFD8" strokeWidth="5" />
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#5E7A66" strokeWidth="5"
+        strokeLinecap="round" strokeDasharray={c} strokeDashoffset={c * (1 - value)}
+        style={{ transition: 'stroke-dashoffset .5s ease' }} />
+    </svg>
+  );
+}
+
+function TaskRow({ task, day, done, onToggle }) {
+  const checkable = CHECKABLE.includes(task.kind);
+  return (
+    <div className={`flex items-start gap-3 px-4 py-3.5 rounded-xl border transition
+      ${done ? 'bg-sageSoft/60 border-sage/30' : 'bg-mist border-line hover:border-bronze/40'}`}>
+      {checkable ? (
+        <button onClick={() => onToggle(keyFor(task, day))} aria-pressed={done}
+          aria-label={done ? `Desmarcar ${task.title}` : `Marcar ${task.title} como feito`}
+          className={`mt-0.5 shrink-0 w-6 h-6 rounded-md grid place-items-center border transition
+            ${done ? 'bg-sage border-sage text-white' : 'bg-mist border-line text-transparent hover:border-bronze'}`}>
+          <Icon d={icons.check} size={15} stroke={2.4} />
+        </button>
+      ) : (
+        <span className="mt-0.5 shrink-0 w-6 h-6 rounded-md grid place-items-center bg-bronzeSoft text-bronzeDeep">
+          <Icon d={icons.alert} size={14} stroke={2} />
+        </span>
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={`text-[15px] font-medium leading-tight ${done ? 'text-sage line-through decoration-sage/40' : 'text-ink'}`}>
+            {task.title}
+          </span>
+          {task.tag && (
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-bronzeDeep bg-bronzeSoft px-1.5 py-0.5 rounded">
+              {task.tag}
+            </span>
+          )}
+        </div>
+        <p className="text-[13px] text-inkSoft mt-1 leading-snug">{task.detail}</p>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------
+   TELA · HOJE
+-----------------------------------------------------------------*/
+function HojeView({ day, surgeryDate, done, toggle }) {
+  const phase = phaseForDay(day);
+
+  const todayTasks = useMemo(() =>
+    CARE.filter(t => CHECKABLE.includes(t.kind) && isActiveOn(t, day)), [day]);
+  const todayMilestones = useMemo(() =>
+    CARE.filter(t => t.kind === 'milestone' && t.start === day), [day]);
+  const advisories = useMemo(() =>
+    CARE.filter(t => t.kind === 'advisory' && isActiveOn(t, day)), [day]);
+
+  const required = [...todayTasks, ...todayMilestones];
+  const doneCount = required.filter(t => done[keyFor(t, day)]).length;
+  const pct = required.length ? doneCount / required.length : 0;
+
+  const nextMilestone = useMemo(() => {
+    return CARE.filter(t => t.kind === 'milestone' && t.start > day)
+      .sort((a, b) => a.start - b.start)[0];
+  }, [day]);
+
+  if (day < 0) {
+    return (
+      <div className="fade-in max-w-2xl">
+        <p className="text-[13px] font-semibold uppercase tracking-[0.18em] text-bronze">Contagem</p>
+        <h1 className="font-serif text-4xl text-ink mt-2">Faltam {Math.abs(day)} dia{Math.abs(day)>1?'s':''}</h1>
+        <p className="text-inkSoft mt-2">para a sua cirurgia, marcada para {addDays(surgeryDate, 0)}. Quando o dia chegar, o app começa a contar a recuperação.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fade-in space-y-7 max-w-2xl">
+      {/* Hero */}
+      <header>
+        <p className="text-[13px] font-semibold uppercase tracking-[0.18em] text-bronze">Seu dia</p>
+        <div className="mt-2 flex items-end gap-4 flex-wrap">
+          <h1 className="font-serif text-[3.4rem] leading-none text-ink">
+            {day === 0 ? 'Dia da cirurgia' : <>Dia <span className="text-bronze">{day}</span></>}
+          </h1>
+        </div>
+        <p className="text-inkSoft mt-3">
+          Fase: <span className="text-ink font-medium">{phase.label}</span>
+          <span className="mx-2 text-line">·</span>
+          {required.length > 0
+            ? <>{doneCount} de {required.length} concluído{required.length>1?'s':''} hoje</>
+            : <>nada obrigatório hoje — siga os cuidados contínuos</>}
+        </p>
+      </header>
+
+      {/* Próximo passo */}
+      {(todayMilestones.length > 0 || nextMilestone) && (
+        <section className="rounded-2xl bg-ink text-porcelain p-5 shadow-card">
+          {todayMilestones.length > 0 ? (
+            <>
+              <p className="text-[12px] font-semibold uppercase tracking-[0.16em] text-bronzeSoft/80">Hoje é dia de</p>
+              {todayMilestones.map(m => (
+                <div key={m.id} className="mt-2">
+                  <h2 className="font-serif text-2xl">{m.title}</h2>
+                  <p className="text-porcelain/70 text-[14px] mt-1.5 leading-snug">{m.detail}</p>
+                </div>
+              ))}
+            </>
+          ) : (
+            <>
+              <p className="text-[12px] font-semibold uppercase tracking-[0.16em] text-bronzeSoft/80">Próximo passo</p>
+              <h2 className="font-serif text-2xl mt-2">{nextMilestone.title}</h2>
+              <p className="text-porcelain/70 text-[14px] mt-1.5 leading-snug">{nextMilestone.detail}</p>
+              <p className="text-bronzeSoft text-[13px] mt-3 font-medium">
+                Dia {nextMilestone.start} · {addDays(surgeryDate, nextMilestone.start)}
+                <span className="text-porcelain/50"> · faltam {nextMilestone.start - day} dia{nextMilestone.start - day>1?'s':''}</span>
+              </p>
+            </>
+          )}
+        </section>
+      )}
+
+      {/* Para fazer hoje */}
+      {required.length > 0 && (
+        <section>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="font-serif text-xl text-ink">Para fazer hoje</h3>
+            <div className="flex items-center gap-2.5">
+              <ProgressRing value={pct} size={42} />
+              <span className="text-[13px] text-inkSoft font-medium">{Math.round(pct*100)}%</span>
+            </div>
+          </div>
+          <div className="space-y-2.5">
+            {todayMilestones.map(t => (
+              <TaskRow key={t.id} task={{...t, kind:'daily'}} day={day} done={!!done[keyFor(t, day)]} onToggle={toggle} />
+            ))}
+            {todayTasks.map(t => (
+              <TaskRow key={t.id} task={t} day={day} done={!!done[keyFor(t, day)]} onToggle={toggle} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Atenção */}
+      {advisories.length > 0 && (
+        <section>
+          <h3 className="font-serif text-xl text-ink mb-3">Fique atento</h3>
+          <div className="space-y-2.5">
+            {advisories.map(t => <TaskRow key={t.id} task={t} day={day} done={false} onToggle={()=>{}} />)}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------
+   TELA · JORNADA (linha do tempo)
+-----------------------------------------------------------------*/
+function JornadaView({ day, surgeryDate, done, toggle }) {
+  // entradas ordenadas: marcos + janelas (representadas pelo início)
+  const entries = useMemo(() => {
+    const list = [];
+    CARE.forEach(t => {
+      if (t.kind === 'milestone') list.push({ ...t, at: t.start, range: null });
+      else if (CHECKABLE.includes(t.kind)) list.push({ ...t, at: t.start, range: fmtRange(t.start, t.end) });
+      else if (t.kind === 'advisory') list.push({ ...t, at: t.start, range: fmtRange(t.start, t.end), soft: true });
+    });
+    return list.sort((a, b) => a.at - b.at || (a.kind === 'milestone' ? -1 : 1));
+  }, []);
+
+  function statusOf(e) {
+    if (e.kind === 'milestone') {
+      if (done[e.id]) return 'feito';
+      if (e.at === day) return 'hoje';
+      if (e.at < day) return 'passou';
+      return 'futuro';
+    }
+    const end = e.end == null ? Infinity : e.end;
+    if (e.at <= day && day <= end) return 'ativo';
+    if (day > end) return 'concluido';
+    return 'futuro';
+  }
+
+  const palette = {
+    feito:      { node: 'bg-sage border-sage', text: 'text-sage', label: 'Concluído' },
+    concluido:  { node: 'bg-sage border-sage', text: 'text-sage', label: 'Concluído' },
+    hoje:       { node: 'bg-bronze border-bronze ring-4 ring-bronzeSoft', text: 'text-bronzeDeep', label: 'Hoje' },
+    ativo:      { node: 'bg-bronze border-bronze ring-4 ring-bronzeSoft', text: 'text-bronzeDeep', label: 'Em andamento' },
+    passou:     { node: 'bg-mist border-line', text: 'text-inkSoft', label: 'Passou' },
+    futuro:     { node: 'bg-mist border-line', text: 'text-inkSoft/60', label: 'A seguir' },
+  };
+
+  // agrupar por fase
+  const byPhase = PHASES.map(p => ({
+    phase: p,
+    items: entries.filter(e => e.at >= p.from && e.at <= p.to),
+  })).filter(g => g.items.length);
+
+  return (
+    <div className="fade-in max-w-2xl">
+      <header className="mb-7">
+        <p className="text-[13px] font-semibold uppercase tracking-[0.18em] text-bronze">Sua jornada</p>
+        <h1 className="font-serif text-4xl text-ink mt-2">Linha do tempo</h1>
+        <p className="text-inkSoft mt-2">Toda a recuperação, do dia da cirurgia ao acompanhamento. O ponto destacado é onde você está hoje.</p>
+      </header>
+
+      {byPhase.map(({ phase, items }) => (
+        <section key={phase.id} className="mb-8">
+          <div className="flex items-baseline gap-3 mb-4">
+            <h2 className="font-serif text-lg text-ink">{phase.label}</h2>
+            <span className="text-[12px] text-inkSoft">
+              {phase.to >= 9999 ? 'a partir de 1 ano' : phase.from === phase.to ? `dia ${phase.from}` : `dias ${phase.from}–${phase.to}`}
+            </span>
+          </div>
+
+          <div className="relative pl-1">
+            <div className="absolute left-[12px] top-2 bottom-2 w-px bg-line" />
+            <div className="space-y-1">
+              {items.map((e, i) => {
+                const st = statusOf(e);
+                const c = palette[st];
+                const isMilestone = e.kind === 'milestone';
+                return (
+                  <div key={e.id + i} className="relative flex gap-4 py-2.5">
+                    <div className="relative z-10 shrink-0">
+                      <span className={`block w-[18px] h-[18px] rounded-full border-2 ${c.node} grid place-items-center text-white`}>
+                        {(st === 'feito' || st === 'concluido') && <Icon d={icons.check} size={11} stroke={3} />}
+                      </span>
+                    </div>
+                    <div className="flex-1 -mt-0.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-[11px] font-semibold uppercase tracking-wide ${c.text}`}>{c.label}</span>
+                        <span className="text-[11px] text-inkSoft/70">
+                          {isMilestone ? `dia ${e.at} · ${addDays(surgeryDate, e.at)}` : e.range}
+                        </span>
+                      </div>
+                      <h3 className={`text-[15px] font-medium mt-0.5 ${st === 'futuro' ? 'text-inkSoft' : 'text-ink'}`}>{e.title}</h3>
+                      <p className="text-[13px] text-inkSoft leading-snug mt-0.5">{e.detail}</p>
+                      {isMilestone && (st === 'hoje' || st === 'passou') && (
+                        <button onClick={() => toggle(e.id)}
+                          className={`mt-2 text-[13px] font-semibold inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition
+                            ${done[e.id] ? 'border-sage text-sage bg-sageSoft' : 'border-bronze text-bronzeDeep hover:bg-bronzeSoft'}`}>
+                          <Icon d={icons.check} size={13} stroke={2.4} />
+                          {done[e.id] ? 'Concluído' : 'Marcar como concluído'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------
+   TELA · MEDICAMENTOS
+-----------------------------------------------------------------*/
+function MedsView({ day, surgeryDate, done, toggle }) {
+  const meds = CARE.filter(t => t.kind === 'med');
+  const asNeeded = CARE.filter(t => t.kind === 'asneeded' || t.kind === 'conditional');
+  const continuous = CARE.filter(t => t.kind === 'continuous');
+
+  return (
+    <div className="fade-in max-w-2xl">
+      <header className="mb-7">
+        <p className="text-[13px] font-semibold uppercase tracking-[0.18em] text-bronze">Prescrição</p>
+        <h1 className="font-serif text-4xl text-ink mt-2">Medicamentos</h1>
+        <p className="text-inkSoft mt-2">Receita do Dr. Pablo Matos Milhomem (19/06/2026) e produtos da orientação de alta.</p>
+      </header>
+
+      <h2 className="font-serif text-lg text-ink mb-3">Com prazo definido</h2>
+      <div className="space-y-3 mb-8">
+        {meds.map(m => {
+          const total = (m.end - m.start) + 1;
+          const elapsed = Math.min(Math.max(day - m.start + 1, 0), total);
+          const active = isActiveOn(m, day);
+          const finished = day > m.end;
+          const isDone = !!done[keyFor(m, day)];
+          return (
+            <div key={m.id} className="rounded-2xl bg-mist border border-line p-4 shadow-card">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-3 min-w-0">
+                  <span className="shrink-0 w-9 h-9 rounded-xl bg-bronzeSoft text-bronzeDeep grid place-items-center">
+                    <Icon d={m.id === 'nebacetin' || m.id === 'bepantol' ? icons.drop : icons.pill} size={18} />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-[15px] font-semibold text-ink">{m.title}</h3>
+                      <span className="text-[11px] font-semibold uppercase tracking-wide text-bronzeDeep bg-bronzeSoft px-1.5 py-0.5 rounded">{m.tag}</span>
+                    </div>
+                    <p className="text-[13px] text-inkSoft mt-1 leading-snug">{m.detail}</p>
+                  </div>
+                </div>
+                {active && (
+                  <button onClick={() => toggle(keyFor(m, day))} aria-pressed={isDone}
+                    aria-label={isDone ? 'Desmarcar dose de hoje' : 'Marcar dose de hoje'}
+                    className={`shrink-0 w-7 h-7 rounded-md grid place-items-center border transition
+                      ${isDone ? 'bg-sage border-sage text-white' : 'bg-mist border-line text-transparent hover:border-bronze'}`}>
+                    <Icon d={icons.check} size={16} stroke={2.4} />
+                  </button>
+                )}
+              </div>
+
+              {/* barra de duração */}
+              <div className="mt-3 flex items-center gap-3">
+                <div className="flex-1 h-1.5 rounded-full bg-line overflow-hidden">
+                  <div className="h-full rounded-full bg-sage" style={{ width: `${(elapsed/total)*100}%` }} />
+                </div>
+                <span className={`text-[12px] font-medium ${finished ? 'text-sage' : active ? 'text-bronzeDeep' : 'text-inkSoft'}`}>
+                  {finished ? 'Tratamento concluído' : active ? `Dia ${elapsed} de ${total}` : `Começa no dia ${m.start}`}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <h2 className="font-serif text-lg text-ink mb-3">Se necessário</h2>
+      <div className="space-y-3 mb-8">
+        {asNeeded.map(m => (
+          <div key={m.id} className="rounded-2xl bg-mist border border-line p-4 flex items-start gap-3">
+            <span className="shrink-0 w-9 h-9 rounded-xl bg-porcelain text-inkSoft grid place-items-center">
+              <Icon d={icons.pill} size={18} />
+            </span>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-[15px] font-semibold text-ink">{m.title}</h3>
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-inkSoft bg-porcelain px-1.5 py-0.5 rounded">{m.tag}</span>
+              </div>
+              <p className="text-[13px] text-inkSoft mt-1 leading-snug">{m.detail}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <h2 className="font-serif text-lg text-ink mb-3">Uso contínuo</h2>
+      <p className="text-[13px] text-inkSoft mb-3 -mt-1">Manter conforme prescrição. O Minoxidil (oral e tópico) volta a partir do 10º dia. Todas as medicações seguem por até 1 ano após o transplante.</p>
+      <div className="rounded-2xl bg-mist border border-line divide-y divide-line overflow-hidden">
+        {continuous.map(m => (
+          <div key={m.id} className="px-4 py-3.5 flex items-center gap-3">
+            <Icon d={icons.repeat} size={17} className="text-bronze shrink-0" />
+            <div className="min-w-0">
+              <h3 className="text-[14px] font-medium text-ink">{m.title}</h3>
+              <p className="text-[12.5px] text-inkSoft leading-snug">{m.detail}</p>
+            </div>
+          </div>
+        ))}
+        <div className="px-4 py-3.5 flex items-center gap-3">
+          <Icon d={icons.repeat} size={17} className="text-bronze shrink-0" />
+          <div>
+            <h3 className="text-[14px] font-medium text-ink">Minoxidil (oral e tópico)</h3>
+            <p className="text-[12.5px] text-inkSoft leading-snug">Retomar após o 10º dia e manter conforme prescrição.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------
+   TELA · CONTATO
+-----------------------------------------------------------------*/
+function ContatoView() {
+  const contacts = [
+    { name: 'Regiane Alves', phone: '62 99444-6494', wa: '5562994446494' },
+    { name: 'Alessandra Moura', phone: '62 98116-8889', wa: '5562981168889' },
+    { name: 'Dr. Pablo Milhomem', phone: '62 98107-0937', wa: '5562981070937' },
+  ];
+  return (
+    <div className="fade-in max-w-2xl">
+      <header className="mb-7">
+        <p className="text-[13px] font-semibold uppercase tracking-[0.18em] text-bronze">Instituto Milhomem</p>
+        <h1 className="font-serif text-4xl text-ink mt-2">Contato</h1>
+        <p className="text-inkSoft mt-2">Rua T-52, nº 70, Setor Bueno — Goiânia/GO. A lavagem do 8º dia deve ser agendada pelo WhatsApp com antecedência.</p>
+      </header>
+      <div className="space-y-3 mb-8">
+        {contacts.map(c => (
+          <div key={c.wa} className="rounded-2xl bg-mist border border-line p-4 flex items-center justify-between gap-3 shadow-card">
+            <div>
+              <h3 className="text-[15px] font-semibold text-ink">{c.name}</h3>
+              <p className="text-[13px] text-inkSoft mt-0.5">{c.phone}</p>
+            </div>
+            <div className="flex gap-2">
+              <a href={`tel:+55${c.wa.slice(2)}`} className="w-10 h-10 rounded-xl bg-porcelain text-ink grid place-items-center hover:bg-line transition" aria-label={`Ligar para ${c.name}`}>
+                <Icon d={icons.phone} size={18} />
+              </a>
+              <a href={`https://wa.me/${c.wa}`} target="_blank" rel="noopener noreferrer"
+                className="px-4 h-10 rounded-xl bg-sage text-white grid place-items-center text-[14px] font-semibold hover:bg-sage/90 transition">
+                WhatsApp
+              </a>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="rounded-2xl border border-bronze/30 bg-bronzeSoft/40 p-4 flex gap-3">
+        <Icon d={icons.alert} size={18} className="text-bronzeDeep shrink-0 mt-0.5" />
+        <p className="text-[13px] text-ink leading-snug">
+          Este app apenas organiza as orientações que você recebeu. Ele não substitui a equipe médica — em caso de dor forte, sangramento, febre ou qualquer dúvida, fale com o Instituto Milhomem.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------
+   Modal de configuração (data da cirurgia)
+-----------------------------------------------------------------*/
+function SettingsModal({ surgeryDate, onSave, onClose }) {
+  const [date, setDate] = useState(surgeryDate);
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center p-4 bg-ink/40" onClick={onClose}>
+      <div className="bg-mist rounded-2xl p-6 w-full max-w-sm shadow-card fade-in" onClick={e => e.stopPropagation()}>
+        <h2 className="font-serif text-2xl text-ink">Data da cirurgia</h2>
+        <p className="text-[13px] text-inkSoft mt-1.5">Define o "Dia 0". Toda a contagem da recuperação parte daqui.</p>
+        <input type="date" value={date} onChange={e => setDate(e.target.value)}
+          className="mt-4 w-full rounded-xl border border-line bg-porcelain px-4 py-3 text-[15px] text-ink focus:outline-none focus:border-bronze" />
+        <div className="flex gap-2 mt-5">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-xl border border-line text-ink font-medium text-[14px] hover:bg-porcelain transition">Cancelar</button>
+          <button onClick={() => onSave(date)} className="flex-1 py-2.5 rounded-xl bg-ink text-porcelain font-semibold text-[14px] hover:bg-ink/90 transition">Salvar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------
+   APP
+-----------------------------------------------------------------*/
+const NAV = [
+  { id: 'hoje', label: 'Hoje', icon: icons.today },
+  { id: 'jornada', label: 'Jornada', icon: icons.journey },
+  { id: 'medicamentos', label: 'Medicamentos', icon: icons.pill },
+  { id: 'contato', label: 'Contato', icon: icons.phone },
+];
+
+function App() {
+  const initial = loadState() || { done: {}, surgeryDate: '2026-06-19' };
+  const [done, setDone] = useState(initial.done || {});
+  const [surgeryDate, setSurgeryDate] = useState(initial.surgeryDate || '2026-06-19');
+  const [view, setView] = useState('hoje');
+  const [showSettings, setShowSettings] = useState(false);
+
+  useEffect(() => { saveState({ done, surgeryDate }); }, [done, surgeryDate]);
+
+  const day = daysSince(surgeryDate);
+  const toggle = (key) => setDone(prev => {
+    const next = { ...prev };
+    if (next[key]) delete next[key]; else next[key] = true;
+    return next;
+  });
+
+  const views = {
+    hoje: <HojeView day={day} surgeryDate={surgeryDate} done={done} toggle={toggle} />,
+    jornada: <JornadaView day={day} surgeryDate={surgeryDate} done={done} toggle={toggle} />,
+    medicamentos: <MedsView day={day} surgeryDate={surgeryDate} done={done} toggle={toggle} />,
+    contato: <ContatoView />,
+  };
+
+  return (
+    <div className="min-h-screen md:flex">
+      {/* Sidebar (desktop) */}
+      <aside className="hidden md:flex md:flex-col w-64 shrink-0 border-r border-line bg-porcelain/60 sticky top-0 h-screen p-6">
+        <div className="flex items-center gap-2.5 mb-9">
+          <span className="w-9 h-9 rounded-full border-2 border-bronze grid place-items-center font-serif text-bronze text-lg">M</span>
+          <div className="leading-tight">
+            <p className="font-serif text-[17px] text-ink">Recuperação</p>
+            <p className="text-[11px] text-inkSoft uppercase tracking-wide">Transplante capilar</p>
+          </div>
+        </div>
+        <nav className="space-y-1">
+          {NAV.map(n => (
+            <button key={n.id} onClick={() => setView(n.id)}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[14.5px] font-medium transition
+                ${view === n.id ? 'bg-ink text-porcelain' : 'text-inkSoft hover:bg-porcelain hover:text-ink'}`}>
+              <Icon d={n.icon} size={19} stroke={view === n.id ? 1.8 : 1.6} />
+              {n.label}
+            </button>
+          ))}
+        </nav>
+        <div className="mt-auto pt-6 border-t border-line">
+          <button onClick={() => setShowSettings(true)}
+            className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-[13px] text-inkSoft hover:text-ink transition">
+            <Icon d={icons.gear} size={16} />
+            Cirurgia: {addDays(surgeryDate, 0)}
+          </button>
+          <p className="text-[11px] text-inkSoft/70 mt-3 px-3 leading-snug">Instituto Milhomem · Dr. Pablo Milhomem</p>
+        </div>
+      </aside>
+
+      {/* Conteúdo */}
+      <main className="flex-1 min-w-0">
+        {/* topo mobile */}
+        <div className="md:hidden sticky top-0 z-30 bg-porcelain/90 backdrop-blur border-b border-line px-5 py-3.5 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="w-7 h-7 rounded-full border-2 border-bronze grid place-items-center font-serif text-bronze text-sm">M</span>
+            <span className="font-serif text-[16px] text-ink">Recuperação</span>
+          </div>
+          <button onClick={() => setShowSettings(true)} className="text-inkSoft p-1" aria-label="Configurar data da cirurgia">
+            <Icon d={icons.gear} size={20} />
+          </button>
+        </div>
+
+        <div className="px-5 md:px-12 py-7 md:py-12 pb-28 md:pb-12">
+          {views[view]}
+        </div>
+      </main>
+
+      {/* Tab bar (mobile) */}
+      <nav className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-mist border-t border-line grid grid-cols-4 px-2 pt-1.5 pb-[calc(0.4rem+env(safe-area-inset-bottom))]">
+        {NAV.map(n => (
+          <button key={n.id} onClick={() => setView(n.id)}
+            className={`flex flex-col items-center gap-1 py-1.5 rounded-lg text-[11px] font-medium transition
+              ${view === n.id ? 'text-bronzeDeep' : 'text-inkSoft'}`}>
+            <Icon d={n.icon} size={21} stroke={view === n.id ? 2 : 1.6} />
+            {n.label}
+          </button>
+        ))}
+      </nav>
+
+      {showSettings && (
+        <SettingsModal surgeryDate={surgeryDate}
+          onSave={(d) => { setSurgeryDate(d); setShowSettings(false); }}
+          onClose={() => setShowSettings(false)} />
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
