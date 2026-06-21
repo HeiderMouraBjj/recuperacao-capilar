@@ -19,6 +19,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
 <script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -140,6 +141,53 @@ function compressImage(file, maxSide = 1280, quality = 0.82) {
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('imagem inválida')); };
     img.src = url;
   });
+}
+
+/* ----------------------------------------------------------------
+   Sincronização na nuvem (Supabase)
+   >>> PREENCHA OS DOIS VALORES ABAIXO para ligar a sincronização. <<<
+   - SUPABASE_URL : a URL do projeto, ex.: https://xxxxxxxx.supabase.co
+   - SUPABASE_KEY : a chave pública (publishable/anon), em Settings > API Keys
+   Deixe vazios ('') para o app funcionar só neste aparelho (offline).
+-----------------------------------------------------------------*/
+const SUPABASE_URL = '';
+const SUPABASE_KEY = '';
+
+const cloudEnabled = !!(SUPABASE_URL && SUPABASE_KEY);
+let sbClient = null;
+function getClient() {
+  if (!cloudEnabled) return null;
+  if (sbClient) return sbClient;
+  if (!window.supabase || !window.supabase.createClient) return null;
+  sbClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  return sbClient;
+}
+async function cloudLoad(userId) {
+  const c = getClient(); if (!c) return null;
+  const { data, error } = await c.from('recovery_state')
+    .select('surgery_date, log, reminders').eq('user_id', userId).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+async function cloudSave(userId, payload) {
+  const c = getClient(); if (!c) return;
+  const row = {
+    user_id: userId,
+    surgery_date: payload.surgeryDate,
+    log: payload.log || {},
+    reminders: payload.reminders || {},
+    updated_at: new Date().toISOString(),
+  };
+  const { error } = await c.from('recovery_state').upsert(row, { onConflict: 'user_id' });
+  if (error) throw error;
+}
+function authErrorPt(e) {
+  const m = (e && e.message ? e.message : '').toLowerCase();
+  if (m.includes('invalid login')) return 'E-mail ou senha incorretos.';
+  if (m.includes('already registered') || m.includes('already exists')) return 'Já existe uma conta com este e-mail. Tente entrar.';
+  if (m.includes('password')) return 'A senha precisa ter ao menos 6 caracteres.';
+  if (m.includes('email')) return 'Verifique o e-mail informado.';
+  return 'Não foi possível concluir. Tente novamente.';
 }
 
 /* ----------------------------------------------------------------
@@ -1006,7 +1054,7 @@ function DiarioView(props) {
 /* ----------------------------------------------------------------
    Painel · Ajustes (cirurgia + lembretes + backup)
 -----------------------------------------------------------------*/
-function SettingsSheet({ surgeryDate, dayCount, reminders, onSetSurgeryDate, onSetReminders, onBackup, onRestore, onClose }) {
+function SettingsSheet({ surgeryDate, dayCount, reminders, cloudEnabled, cloudUser, syncStatus, onSignOut, onWantLogin, onSetSurgeryDate, onSetReminders, onBackup, onRestore, onClose }) {
   const [date, setDate] = useState(surgeryDate);
   const fileRef = React.useRef(null);
   const [perm, setPerm] = useState(typeof Notification !== 'undefined' ? Notification.permission : 'unsupported');
@@ -1030,6 +1078,26 @@ function SettingsSheet({ surgeryDate, dayCount, reminders, onSetSurgeryDate, onS
           <button onClick={onClose} aria-label="Fechar" className="text-inkSoft p-1"><Icon d={icons.x} size={20} /></button>
         </div>
         <div className="p-5 space-y-7">
+          {cloudEnabled && (
+            <section>
+              <h3 className="text-[12px] font-semibold uppercase tracking-wide text-bronze mb-2">Sincronização</h3>
+              {cloudUser ? (
+                <>
+                  <p className="text-[13px] text-inkSoft">Conectado como <span className="text-ink font-medium">{cloudUser.email}</span>.</p>
+                  <p className={`text-[12px] mt-1 ${syncStatus === 'error' ? 'text-bronzeDeep' : 'text-sage'}`}>
+                    {syncStatus === 'saving' ? 'Salvando…' : syncStatus === 'error' ? 'Erro ao sincronizar — vamos tentar de novo.' : 'Tudo salvo na nuvem.'}
+                  </p>
+                  <button onClick={onSignOut} className="mt-3 w-full py-2.5 rounded-xl border border-line text-ink font-semibold text-[14px]">Sair da conta</button>
+                </>
+              ) : (
+                <>
+                  <p className="text-[13px] text-inkSoft">Você está usando só neste aparelho. Entre para salvar na nuvem e sincronizar entre dispositivos.</p>
+                  <button onClick={onWantLogin} className="mt-3 w-full py-2.5 rounded-xl bg-ink text-porcelain font-semibold text-[14px]">Entrar / criar conta</button>
+                </>
+              )}
+            </section>
+          )}
+
           <section>
             <h3 className="text-[12px] font-semibold uppercase tracking-wide text-bronze mb-2">Data da cirurgia</h3>
             <p className="text-[13px] text-inkSoft mb-2">Define o "Dia 0". Hoje é o dia {dayCount}.</p>
@@ -1083,6 +1151,84 @@ function SettingsSheet({ surgeryDate, dayCount, reminders, onSetSurgeryDate, onS
 }
 
 /* ----------------------------------------------------------------
+   Tela de login (nuvem)
+-----------------------------------------------------------------*/
+function AuthScreen({ onSkip }) {
+  const [mode, setMode] = useState('signin');
+  const [email, setEmail] = useState('');
+  const [pass, setPass] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  async function submit() {
+    const c = getClient();
+    if (!c) { setMsg('Sincronização não configurada.'); return; }
+    if (!email || !pass) { setMsg('Preencha e-mail e senha.'); return; }
+    setBusy(true); setMsg('');
+    try {
+      if (mode === 'signin') {
+        const { error } = await c.auth.signInWithPassword({ email: email.trim(), password: pass });
+        if (error) throw error;
+      } else {
+        const { data, error } = await c.auth.signUp({ email: email.trim(), password: pass });
+        if (error) throw error;
+        if (!data.session) setMsg('Conta criada. Se for pedida confirmação por e-mail, confirme e depois entre.');
+      }
+    } catch (e) { setMsg(authErrorPt(e)); }
+    setBusy(false);
+  }
+
+  return (
+    <div className="min-h-screen grid place-items-center p-5 bg-porcelain">
+      <div className="w-full max-w-sm fade-in">
+        <div className="flex items-center gap-2.5 mb-7 justify-center">
+          <span className="w-10 h-10 rounded-full border-2 border-bronze grid place-items-center font-serif text-bronze text-xl">M</span>
+          <div className="leading-tight">
+            <p className="font-serif text-[18px] text-ink">Recuperação</p>
+            <p className="text-[11px] text-inkSoft uppercase tracking-wide">Transplante capilar</p>
+          </div>
+        </div>
+        <div className="bg-mist border border-line rounded-2xl p-6 shadow-card">
+          <h1 className="font-serif text-2xl text-ink">{mode === 'signin' ? 'Entrar' : 'Criar conta'}</h1>
+          <p className="text-[13px] text-inkSoft mt-1.5">Seus dados ficam salvos na nuvem e sincronizam entre aparelhos.</p>
+          <div className="space-y-2.5 mt-5">
+            <input type="email" inputMode="email" autoComplete="email" placeholder="E-mail" value={email}
+              onChange={e => setEmail(e.target.value)}
+              className="w-full rounded-xl border border-line bg-porcelain px-4 py-3 text-[15px] text-ink focus:outline-none focus:border-bronze" />
+            <input type="password" autoComplete={mode === 'signin' ? 'current-password' : 'new-password'} placeholder="Senha" value={pass}
+              onChange={e => setPass(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+              className="w-full rounded-xl border border-line bg-porcelain px-4 py-3 text-[15px] text-ink focus:outline-none focus:border-bronze" />
+          </div>
+          {msg && <p className="text-[13px] text-bronzeDeep mt-3 leading-snug">{msg}</p>}
+          <button onClick={submit} disabled={busy}
+            className="w-full mt-4 py-3 rounded-xl bg-ink text-porcelain font-semibold text-[14px] disabled:opacity-60">
+            {busy ? 'Aguarde…' : (mode === 'signin' ? 'Entrar' : 'Criar conta')}
+          </button>
+          <button onClick={() => { setMode(mode === 'signin' ? 'signup' : 'signin'); setMsg(''); }}
+            className="w-full mt-3 text-[13px] text-inkSoft font-medium">
+            {mode === 'signin' ? 'Não tem conta? Criar uma' : 'Já tem conta? Entrar'}
+          </button>
+        </div>
+        <button onClick={onSkip} className="w-full mt-4 text-[13px] text-inkSoft font-medium">
+          Usar só neste aparelho (sem sincronizar)
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Splash() {
+  return (
+    <div className="min-h-screen grid place-items-center bg-porcelain">
+      <div className="flex flex-col items-center gap-3 fade-in">
+        <span className="w-12 h-12 rounded-full border-2 border-bronze grid place-items-center font-serif text-bronze text-2xl">M</span>
+        <p className="text-[13px] text-inkSoft">Carregando…</p>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------
    APP
 -----------------------------------------------------------------*/
 const NAV = [
@@ -1105,11 +1251,19 @@ function App() {
   const swWaiting = React.useRef(null);
   const firedRef = React.useRef({});
 
+  // nuvem
+  const [cloudUser, setCloudUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(!cloudEnabled);
+  const [localOnly, setLocalOnly] = useState(!!initial.localOnly);
+  const [syncStatus, setSyncStatus] = useState('idle');
+  const [syncReady, setSyncReady] = useState(false);
+  const hydratedRef = React.useRef(false);
+
   const today = daysSince(surgeryDate);
   const [viewDay, setViewDay] = useState(today);
 
-  // persiste marcações, data e lembretes
-  useEffect(() => { saveState({ done: log, surgeryDate, reminders }); }, [log, surgeryDate, reminders]);
+  // persiste localmente (cache offline)
+  useEffect(() => { saveState({ done: log, surgeryDate, reminders, localOnly }); }, [log, surgeryDate, reminders, localOnly]);
 
   // carrega fotos do IndexedDB
   useEffect(() => { photoAll().then(setPhotos).catch(() => {}); }, []);
@@ -1135,6 +1289,56 @@ function App() {
     const iv = setInterval(tick, 20000);
     return () => clearInterval(iv);
   }, [reminders]);
+
+  // sessão da nuvem + escuta de login
+  useEffect(() => {
+    if (!cloudEnabled) { setAuthChecked(true); return; }
+    const c = getClient();
+    if (!c) { setAuthChecked(true); return; }
+    let sub = null;
+    c.auth.getSession().then(({ data }) => {
+      setCloudUser(data && data.session ? data.session.user : null);
+      setAuthChecked(true);
+    }).catch(() => setAuthChecked(true));
+    const res = c.auth.onAuthStateChange((_e, session) => {
+      setCloudUser(session ? session.user : null);
+      if (!session) { hydratedRef.current = false; setSyncReady(false); }
+    });
+    if (res && res.data) sub = res.data.subscription;
+    return () => { if (sub) sub.unsubscribe(); };
+  }, []);
+
+  // ao logar: carrega da nuvem (ou migra o que já está local)
+  useEffect(() => {
+    if (!cloudUser || hydratedRef.current) return;
+    hydratedRef.current = true;
+    setSyncStatus('saving');
+    (async () => {
+      try {
+        const row = await cloudLoad(cloudUser.id);
+        if (row) {
+          setLogState(row.log || {});
+          if (row.surgery_date) { setSurgeryDate(row.surgery_date); setViewDay(daysSince(row.surgery_date)); }
+          if (row.reminders) setReminders(row.reminders);
+        } else {
+          await cloudSave(cloudUser.id, { surgeryDate, log, reminders });
+        }
+        setSyncStatus('saved');
+      } catch (e) { setSyncStatus('error'); }
+      setSyncReady(true);
+    })();
+  }, [cloudUser]);
+
+  // salva na nuvem quando algo muda (após hidratar)
+  useEffect(() => {
+    if (!cloudUser || !syncReady) return;
+    setSyncStatus('saving');
+    const id = setTimeout(async () => {
+      try { await cloudSave(cloudUser.id, { surgeryDate, log, reminders }); setSyncStatus('saved'); }
+      catch (e) { setSyncStatus('error'); }
+    }, 800);
+    return () => clearTimeout(id);
+  }, [log, surgeryDate, reminders, cloudUser, syncReady]);
 
   const setLog = (key, value) => setLogState(prev => {
     const next = { ...prev };
@@ -1195,6 +1399,11 @@ function App() {
     else window.location.reload();
   };
   const saveSurgeryDate = (d) => { setSurgeryDate(d); setViewDay(daysSince(d)); setShowSettings(false); };
+  const wantLogin = () => { setLocalOnly(false); setShowSettings(false); };
+  const signOut = async () => {
+    try { const c = getClient(); if (c) await c.auth.signOut(); } catch (_) {}
+    setLocalOnly(false); setShowSettings(false);
+  };
 
   const views = {
     hoje: <HojeView day={viewDay} today={today} setViewDay={setViewDay} surgeryDate={surgeryDate} log={log} setLog={setLog} setTop={setTop} skipTask={skipTask} />,
@@ -1203,6 +1412,9 @@ function App() {
     diario: <DiarioView day={today} surgeryDate={surgeryDate} log={log} photos={photos} onAddPhoto={addPhoto} onDeletePhoto={deletePhoto} />,
     contato: <ContatoView />,
   };
+
+  if (cloudEnabled && !authChecked) return <Splash />;
+  if (cloudEnabled && !cloudUser && !localOnly) return <AuthScreen onSkip={() => setLocalOnly(true)} />;
 
   return (
     <div className="min-h-screen md:flex">
@@ -1261,6 +1473,8 @@ function App() {
 
       {showSettings && (
         <SettingsSheet surgeryDate={surgeryDate} dayCount={today} reminders={reminders}
+          cloudEnabled={cloudEnabled} cloudUser={cloudUser} syncStatus={syncStatus}
+          onSignOut={signOut} onWantLogin={wantLogin}
           onSetSurgeryDate={saveSurgeryDate} onSetReminders={setReminders}
           onBackup={doBackup} onRestore={doRestore} onClose={() => setShowSettings(false)} />
       )}
